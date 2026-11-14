@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+{% if !error.is_empty() %}<p class="error">{{ error }}</p>{% endif %}
+{% if !sync_error.is_empty() %}<p class="error">Sync problem: {{ sync_error }}</p>{% endif %}
+
+<section class="cards">
+  <a class="card card-block" href="/decisions?status=block"><span class="value">{{ block }}</span><span class="label">blocked</span></a>
+  <a class="card card-mark" href="/decisions?status=mark"><span class="value">{{ mark }}</span><span class="label">marked</span></a>
+  <a class="card card-allow" href="/decisions?status=allow"><span class="value">{{ allow }}</span><span class="label">allowed</span></a>
+</section>
+
+<div class="grid">
+<section>
+  <h2>By actor type</h2>
+  {% if types.is_empty() %}<p class="empty">No decisions yet.</p>{% else %}
+  <table>
+    <thead><tr><th>Type</th><th class="num">Block</th><th class="num">Mark</th><th class="num">Allow</th></tr></thead>
+    <tbody>
+    {% for t in types %}
+      <tr><td><a href="/decisions?type={{ t.name|urlencode }}">{{ t.name }}</a></td><td class="num">{{ t.block }}</td><td class="num">{{ t.mark }}</td><td class="num">{{ t.allow }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <h2>Expiring within 24 hours</h2>
+  {% if expiring.is_empty() %}<p class="empty">Nothing expires soon.</p>{% else %}
+  <table>
+    <tbody>
+    {% for r in expiring %}
+      <tr><td class="actor" title="{{ r.actor }}"><a href="/actor?q={{ r.actor|urlencode }}">{{ r.actor }}</a></td><td>{% call m::status(r.status) %}{% endcall %}</td><td title="{{ r.expires_title }}">{{ r.expires }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <h2>Backend</h2>
+  <dl class="facts">
+    <dt>Server</dt><dd>{{ server }}</dd>
+    <dt>Module</dt><dd>{{ module }}</dd>
+    <dt>Change log</dt><dd>{{ stream_len }} entries, at sequence {{ seq }}</dd>
+    <dt>Last sync</dt><dd>{% if synced %}{{ last_sync }} ago{% else %}not synced yet{% endif %}</dd>
+  </dl>
+</section>
+
+<section>
+  <h2>Recent changes <a class="more" href="/activity">all activity →</a></h2>
+  {% if recent.is_empty() %}<p class="empty">No changes recorded.</p>{% else %}
+  {% call m::changes_table(recent, true) %}{% endcall %}
+  {% endif %}
+</section>
+</div>
+{% endblock %}

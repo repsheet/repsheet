@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}{% endblock %} · Repsheet</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/">Repsheet</a>
+  <nav>
+    <a href="/" {% if nav == "dashboard" %}aria-current="page"{% endif %}>Dashboard</a>
+    <a href="/decisions" {% if nav == "decisions" %}aria-current="page"{% endif %}>Decisions</a>
+    <a href="/activity" {% if nav == "activity" %}aria-current="page"{% endif %}>Activity</a>
+    {% if !read_only %}<a href="/new" {% if nav == "new" %}aria-current="page"{% endif %}>New decision</a>{% endif %}
+  </nav>
+  <form class="search" action="/actor" method="get" role="search">
+    <input type="search" name="q" placeholder="Look up an IP, network or actor" aria-label="Look up an actor" required>
+  </form>
+  {% if read_only %}<span class="badge">read-only</span>{% endif %}
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

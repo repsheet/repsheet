@@ -1,6 +1,6 @@
-.PHONY: all bootstrap module nginx test test-module test-nginx sanitize clean distclean format
+.PHONY: all bootstrap module nginx admin test test-module test-nginx test-admin sanitize clean distclean format
 
-all: module nginx
+all: module nginx admin
 
 # Fetch and build pinned hiredis, Valkey and nginx into .deps/
 bootstrap:
@@ -12,7 +12,11 @@ module:
 nginx: module
 	script/bootstrap nginx
 
-test: module
+# The web admin UI (needs a Rust toolchain).
+admin:
+	cargo build --release --manifest-path admin/Cargo.toml
+
+test: module admin
 	cd tests && uv run pytest
 
 test-module: module
@@ -20,6 +24,10 @@ test-module: module
 
 test-nginx: module
 	cd tests && uv run pytest test_nginx.py
+
+test-admin: module admin
+	cargo test --manifest-path admin/Cargo.toml
+	cd tests && uv run pytest test_admin.py
 
 # Full suite with ASan/UBSan on the module, Valkey and nginx.
 sanitize:
@@ -31,9 +39,11 @@ sanitize:
 
 format:
 	clang-format -i common/*.c common/*.h redis/src/*.c
+	cargo fmt --manifest-path admin/Cargo.toml
 
 clean:
 	$(MAKE) -C redis clean
+	cargo clean --manifest-path admin/Cargo.toml
 
 distclean: clean
 	script/bootstrap clean

@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}New decision{% endblock %}
+{% block content %}
+<h1>New decision</h1>
+{% if read_only %}<p class="error">This admin UI is read-only.</p>{% else %}
+{% if !error.is_empty() %}<p class="error">{{ error }}</p>{% endif %}
+{% call m::decision_form(form, "Save decision") %}{% endcall %}
+{% endif %}
+{% endblock %}

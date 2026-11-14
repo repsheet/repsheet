@@ -1,0 +1,43 @@
+{% macro status(s) %}<span class="status status-{{ s }}">{{ s }}</span>{% endmacro %}
+
+{% macro changes_table(rows, show_actor) %}
+<table>
+  <thead><tr><th class="num">#</th><th>When</th>{% if show_actor %}<th>Actor</th>{% endif %}<th>Change</th><th>Reason</th><th>Expires</th><th>By</th></tr></thead>
+  <tbody>
+  {% for c in rows %}
+    <tr>
+      <td class="num">{{ c.seq }}</td>
+      <td class="when" title="{{ c.at_title }}">{{ c.at }}</td>
+      {% if show_actor %}<td class="actor" title="{{ c.actor }}"><a href="/actor?q={{ c.actor|urlencode }}">{{ c.actor }}</a></td>{% endif %}
+      <td>{% call status(c.status) %}{% endcall %}</td>
+      <td class="reason">{{ c.reason }}</td>
+      <td>{{ c.expires }}</td>
+      <td>{{ c.by }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endmacro %}
+
+{% macro decision_form(form, submit) %}
+<form class="decision" method="post" action="/decisions">
+  <label>Actor
+    <input name="actor" value="{{ form.actor }}" required maxlength="512" placeholder="203.0.113.7, 198.51.100.0/24, session:abc123">
+  </label>
+  <fieldset class="choices">
+    <legend>Decision</legend>
+    <label><input type="radio" name="status" value="block" {% if form.status == "block" %}checked{% endif %}> Block</label>
+    <label><input type="radio" name="status" value="mark" {% if form.status == "mark" %}checked{% endif %}> Mark</label>
+    <label><input type="radio" name="status" value="allow" {% if form.status == "allow" %}checked{% endif %}> Allow</label>
+  </fieldset>
+  <label>Reason
+    <input name="reason" value="{{ form.reason }}" maxlength="1024" placeholder="Why? Shown in logs and to the application.">
+  </label>
+  <label>Expires after
+    <input name="ttl" value="{{ form.ttl }}" list="ttl-presets" placeholder="never" pattern="\s*(never|[0-9]+[smhdSMHD]?)?\s*">
+    <datalist id="ttl-presets"><option value="1h"><option value="24h"><option value="7d"><option value="30d"><option value="never"></datalist>
+    <small>Seconds or 15m, 2h, 7d. Leave empty to keep it until cleared.</small>
+  </label>
+  <button type="submit">{{ submit }}</button>
+</form>
+{% endmacro %}

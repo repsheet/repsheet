@@ -2,6 +2,7 @@
 #
 #   docker build --target valkey -t repsheet-valkey .
 #   docker build --target nginx  -t repsheet-nginx  .
+#   docker build --target admin  -t repsheet-admin  .
 #
 # or use examples/docker-compose.yml. Modules are built inside the official
 # images they run in, so they match that nginx and Valkey exactly.
@@ -47,3 +48,19 @@ FROM nginx:${NGINX_VERSION} AS nginx
 ARG NGINX_VERSION
 COPY --from=nginx-build /build/nginx-${NGINX_VERSION}/objs/ngx_http_repsheet_module.so /etc/nginx/modules/
 RUN sed -i '1i load_module modules/ngx_http_repsheet_module.so;' /etc/nginx/nginx.conf
+
+# --------------------------------------------------------------------------
+FROM rust:1-slim-trixie AS admin-build
+WORKDIR /src
+COPY common /src/common
+COPY admin /src/admin
+RUN cd admin && cargo build --release --locked
+
+FROM debian:trixie-slim AS admin
+COPY --from=admin-build /src/admin/target/release/repsheet-admin /usr/local/bin/repsheet-admin
+USER nobody
+EXPOSE 8090
+# The container must listen on all interfaces; publish the port on the host's
+# loopback only (see examples/docker-compose.yml). There is no login.
+ENV REPSHEET_ADMIN_LISTEN=0.0.0.0:8090
+ENTRYPOINT ["repsheet-admin"]

@@ -28,13 +28,14 @@ memory, without a network round trip.
 
 ## How it works
 
-The repository contains two components:
+The repository contains three components:
 
 | Directory | What it is |
 |-----------|------------|
 | `redis/`  | A module for Valkey (≥ 7.2) and Redis (≥ 7.2). It is the source of truth: it validates and canonicalizes actors, stores decisions with optional TTLs, and keeps an ordered change log. |
 | `nginx/`  | An nginx module. It holds a full copy of the decisions in shared memory and evaluates every request against it. |
-| `common/` | Actor parsing and canonicalization shared by both. |
+| `admin/`  | `repsheet-admin`, a web UI for viewing and managing decisions (Rust). |
+| `common/` | Actor parsing and canonicalization shared by all three. |
 
 The nginx module never queries Redis while handling a request. One worker
 keeps the shared memory store in sync:
@@ -70,6 +71,8 @@ curl -i localhost:8080/                         # 403
 curl -s localhost:8080/metrics
 ```
 
+The admin UI is on http://localhost:8090.
+
 `examples/` also shows how to pass marks to an upstream and how to rate limit
 marked actors.
 
@@ -81,10 +84,10 @@ becomes IPv4, and `/32` and `/128` are dropped. So `10.1.2.3/8`,
 `ip:10.0.0.0/8` and `::ffff:10.0.0.0/104` are all the same actor.
 
 ```
-REPSHEET.BLOCK <actor> [REASON <text>] [TTL <seconds>]
-REPSHEET.ALLOW <actor> [REASON <text>] [TTL <seconds>]
-REPSHEET.MARK  <actor> [REASON <text>] [TTL <seconds>]
-REPSHEET.CLEAR <actor>                          -> 1 if a decision was removed
+REPSHEET.BLOCK <actor> [REASON <text>] [TTL <seconds>] [BY <who>]
+REPSHEET.ALLOW <actor> [REASON <text>] [TTL <seconds>] [BY <who>]
+REPSHEET.MARK  <actor> [REASON <text>] [TTL <seconds>] [BY <who>]
+REPSHEET.CLEAR <actor> [BY <who>]               -> 1 if a decision was removed
 REPSHEET.GET   <actor>                          -> map or nil (exact actor only)
 REPSHEET.CHECK <actor> [<actor> ...]            -> [status, reason, matched actor]
 REPSHEET.SNAPSHOT                               -> [epoch, seq, [[actor, status, reason, expires]...]]
@@ -93,7 +96,7 @@ REPSHEET.VERSION
 ```
 
 ```
-> REPSHEET.BLOCK 2001:db8:42::/48 REASON "abuse report #4411" TTL 86400
+> REPSHEET.BLOCK 2001:db8:42::/48 REASON "abuse report #4411" TTL 86400 BY alice
 OK
 > REPSHEET.MARK session:9f2c41 REASON "impossible travel"
 OK
@@ -103,7 +106,9 @@ OK
 3) "ip:2001:db8:42::/48"
 ```
 
-A new decision for an actor replaces the previous one. `REPSHEET.CHECK`
+`BY` records who made the change, on the decision and in the change log; it is
+optional, at most 256 bytes, and has no effect on enforcement. A new decision
+for an actor replaces the previous one. `REPSHEET.CHECK`
 evaluates a set of actors exactly the way nginx does, which makes it useful
 for applications and for debugging.
 
@@ -116,10 +121,10 @@ All keys share the `{repsheet}` hash tag.
 
 | Key | Type | Contents |
 |-----|------|----------|
-| `{repsheet}:actor:<actor>` | hash | `status`, `reason`, `created`, `expires` (ms, 0 = never); TTL set to match |
+| `{repsheet}:actor:<actor>` | hash | `status`, `reason`, `created`, `expires` (ms, 0 = never), `by`; TTL set to match |
 | `{repsheet}:index` | set | every actor with a decision |
 | `{repsheet}:meta` | hash | `epoch` (random, created on the first write), `seq` |
-| `{repsheet}:changes` | stream | one entry per change, ID `<seq>-0`, capped at `changelog-max` |
+| `{repsheet}:changes` | stream | one entry per change (`op`, `actor`, `status`, `reason`, `expires`, `by`, `at` in ms), ID `<seq>-0`, capped at `changelog-max` |
 | `{repsheet}:notify` | pubsub | `<epoch>:<seq>` after every change |
 
 The change stream is also a convenient feed for other consumers (`XREAD`).
@@ -204,15 +209,80 @@ Things to know:
 | `repsheet_sync_snapshots_total`, `repsheet_sync_changes_total`, `repsheet_sync_errors_total` | Sync activity. |
 | `repsheet_zone_size_bytes`, `repsheet_zone_free_bytes`, `repsheet_zone_alloc_failures_total` | Shared memory. |
 
+## Admin UI
+
+`repsheet-admin` is a small web UI on top of the same commands:
+
+* **Dashboard**: counts by status and actor type, decisions expiring soon,
+  recent changes, backend health.
+* **Decisions**: every decision, filtered by status, type or text.
+* **Actor lookup**: what nginx would do for an address or actor and which
+  decision causes it (for example the `/24` an address falls in), the
+  decision stored for it, and its history.
+* **Changes**: block, allow, mark or clear, with a reason and an expiry.
+  Every change is recorded with its author.
+* **Activity**: the change log, newest first.
+
+```sh
+make admin
+admin/target/release/repsheet-admin --redis redis://10.0.0.5:6379
+# open http://127.0.0.1:8090
+```
+
+It keeps its own in-memory copy of the decisions, synced the same way as
+nginx, so lists stay fast with hundreds of thousands of decisions.
+
+**There is no login.** Anyone who can reach the UI can change decisions. By
+default it listens on `127.0.0.1:8090` only. To give others access, put it
+behind a proxy that authenticates users (oauth2-proxy, an SSO gateway, nginx
+with `auth_request`) and pass the user name along:
+
+```nginx
+location / {
+    auth_request /oauth2/auth;
+    auth_request_set $user $upstream_http_x_auth_request_user;
+    proxy_set_header X-Forwarded-User $user;
+    proxy_set_header Host $host;    # needed for the same-origin check
+    proxy_pass http://127.0.0.1:8090;
+}
+```
+
+```sh
+repsheet-admin --user-header X-Forwarded-User --allowed-host admin.example.com
+```
+
+Without `--user-header`, changes are recorded as `repsheet-admin`
+(`--default-by` changes that). Only use `--user-header` when the proxy is the
+only way to reach the UI, since the header is trusted as sent.
+
+The UI also defends against attacks through the user's own browser: form
+submissions must come from the UI's own pages (`Origin`/`Referer` check), and
+requests for unknown host names are refused, which stops DNS rebinding. Add
+the names you use with `--allowed-host`. `--read-only` shows everything and
+refuses changes.
+
+| Option | Environment | Default |
+|--------|-------------|---------|
+| `--redis <url>` | `REPSHEET_REDIS` | `redis://127.0.0.1:6379` (also `redis://user:pass@host/`, `unix:///path`) |
+| `--listen <addr>` | `REPSHEET_ADMIN_LISTEN` | `127.0.0.1:8090` |
+| `--allowed-host <name>` | `REPSHEET_ADMIN_ALLOWED_HOSTS` (comma-separated) | IP addresses and `localhost` only |
+| `--user-header <name>` | `REPSHEET_ADMIN_USER_HEADER` | none |
+| `--default-by <who>` | `REPSHEET_ADMIN_DEFAULT_BY` | `repsheet-admin` |
+| `--read-only` | `REPSHEET_ADMIN_READ_ONLY` | off |
+| `--sync-interval <s>` | `REPSHEET_ADMIN_SYNC_INTERVAL` | `1` |
+
+`/healthz` returns 200 once the UI is in sync with Valkey/Redis.
+
 ## Building
 
 Requirements: a C compiler, make, hiredis ≥ 1.0 (for nginx), and nginx
-sources. The tests need [uv](https://docs.astral.sh/uv/).
+sources. The admin UI needs a Rust toolchain (1.88 or later). The tests need
+[uv](https://docs.astral.sh/uv/).
 
 ```sh
 make bootstrap   # fetch + build pinned hiredis, Valkey and nginx into .deps/
-make             # build redis/repsheet.so and nginx with the module
-make test        # pytest suite against real Valkey and nginx
+make             # build redis/repsheet.so, nginx with the module, and repsheet-admin
+make test        # pytest suite against real Valkey, nginx and the admin UI
 make sanitize    # the same suite with ASan/UBSan on the module, Valkey and nginx
 ```
 
@@ -226,7 +296,8 @@ build against a packaged nginx, configure the same nginx version with
 instead of Valkey, set `REPSHEET_SERVER=/path/to/redis-server`.
 
 CI covers Valkey 9.1 and Redis 8.10, nginx 1.30 (stable) and 1.31
-(mainline), static and dynamic builds, and a sanitizer run.
+(mainline), static and dynamic builds, a sanitizer run, and the admin UI
+(rustfmt, clippy, unit and integration tests).
 
 ## History
 

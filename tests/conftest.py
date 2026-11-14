@@ -6,6 +6,7 @@ Binaries are taken from .deps/ (built by script/bootstrap) unless overridden:
   REPSHEET_SERVER   path to valkey-server / redis-server
   REPSHEET_NGINX    path to an nginx binary built with the repsheet module
   REPSHEET_MODULE   path to the nginx dynamic module, if built with DYNAMIC=1
+  REPSHEET_ADMIN    path to the repsheet-admin binary
 """
 
 import os
@@ -244,3 +245,73 @@ def metrics(n):
             key, value = line.rsplit(" ", 1)
             out[key] = float(value)
     return out
+
+
+# --------------------------------------------------------------------------
+# admin UI
+# --------------------------------------------------------------------------
+
+
+def admin_binary():
+    env = os.environ.get("REPSHEET_ADMIN")
+    if env:
+        return env
+    # The most recently built of the release and debug binaries.
+    built = [p for p in (ROOT / "admin" / "target" / profile / "repsheet-admin" for profile in ("release", "debug"))
+             if p.exists()]
+    if not built:
+        pytest.skip("repsheet-admin not built; run make admin")
+    return str(max(built, key=lambda p: p.stat().st_mtime))
+
+
+class Admin:
+    """A running repsheet-admin. `get`/`post` send same-origin requests."""
+
+    def __init__(self, tmp, redis_port, args=()):
+        self.port = free_port()
+        self.base = f"http://127.0.0.1:{self.port}"
+        self.log_path = Path(tempfile.mkdtemp(dir=tmp)) / "admin.log"
+        self.log = open(self.log_path, "w")
+        self.proc = subprocess.Popen(
+            [admin_binary(), "--redis", f"redis://127.0.0.1:{redis_port}",
+             "--listen", f"127.0.0.1:{self.port}", *args],
+            stdout=self.log, stderr=subprocess.STDOUT,
+        )
+        self.session = requests.Session()
+        wait_for(lambda: self.session.get(self.base + "/healthz", timeout=1).status_code == 200,
+                 message=f"admin to start; log:\n{self.log_path}")
+
+    def get(self, path, **kw):
+        return self.session.get(self.base + path, timeout=5, **kw)
+
+    def post(self, path, data, headers=None, **kw):
+        h = {"Origin": self.base}
+        h.update(headers or {})
+        return self.session.post(self.base + path, data=data, headers=h, timeout=5,
+                                 allow_redirects=False, **kw)
+
+    def stop(self):
+        self.proc.terminate()
+        self.proc.wait(timeout=10)
+        self.log.close()
+        text = self.log_path.read_text()
+        assert "panicked" not in text, text[-4000:]
+
+
+@pytest.fixture
+def admin_factory(server, r, tmp_path):
+    started = []
+
+    def make(args=()):
+        a = Admin(tmp_path, server.port, args)
+        started.append(a)
+        return a
+
+    yield make
+    for a in started:
+        a.stop()
+
+
+@pytest.fixture
+def admin(admin_factory):
+    return admin_factory()

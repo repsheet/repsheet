@@ -1,6 +1,7 @@
 # docker compose -f examples/docker-compose.yml up --build
 #
-# nginx on http://localhost:8080, metrics on http://localhost:8080/metrics.
+# nginx on http://localhost:8080, metrics on http://localhost:8080/metrics,
+# admin UI on http://localhost:8090 (no login; published on loopback only).
 # Manage decisions with:
 #   docker compose -f examples/docker-compose.yml exec valkey valkey-cli REPSHEET.BLOCK 172.16.0.0/12 REASON demo
 services:
@@ -19,5 +20,16 @@ services:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       # http-level settings; the 00- prefix makes them load before default.conf
       - ./repsheet.conf:/etc/nginx/conf.d/00-repsheet.conf:ro
+    depends_on:
+      - valkey
+
+  admin:
+    build:
+      context: ..
+      target: admin
+    environment:
+      REPSHEET_REDIS: redis://valkey:6379
+    ports:
+      - "127.0.0.1:8090:8090"
     depends_on:
       - valkey

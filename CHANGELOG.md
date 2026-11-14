@@ -26,6 +26,11 @@ repository. History from both is preserved.
   `REPSHEET.CHANGES`; `REASON` and `TTL` options.
 - Valkey (≥ 7.2) and Redis (≥ 7.2) support, Unix sockets, `AUTH`, and syncing
   from replicas.
+- `repsheet-admin`, a web UI (Rust) to look up actors, list, add, change and
+  clear decisions, and browse the change log. Replaces the archived
+  `repsheet/visualizer`.
+- `BY <who>` on `REPSHEET.ALLOW`/`BLOCK`/`MARK`/`CLEAR` records the author;
+  change log entries carry `by` and `at` (time of change).
 - Docker images and a compose example; GitHub Actions CI; ASan/UBSan runs.
 
 ### Fixed

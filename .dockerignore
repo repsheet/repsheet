@@ -3,3 +3,4 @@
 tests/.venv
 **/*.o
 **/*.so
+admin/target

@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}Activity{% endblock %}
+{% block content %}
+<h1>Activity</h1>
+{% if !error.is_empty() %}<p class="error">{{ error }}</p>{% endif %}
+{% if changes.is_empty() %}<p class="empty">No changes recorded.</p>{% else %}
+{% call m::changes_table(changes, true) %}{% endcall %}
+{% endif %}
+{% if next > 0 %}<nav class="pager"><a href="/activity?before={{ next }}">older →</a></nav>{% endif %}
+{% endblock %}

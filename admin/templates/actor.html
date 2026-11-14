@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}{% if canonical.is_empty() %}Look up{% else %}{{ canonical }}{% endif %}{% endblock %}
+{% block content %}
+{% if q.is_empty() %}
+<h1>Look up an actor</h1>
+<form class="lookup" action="/actor" method="get">
+  <input type="search" name="q" placeholder="203.0.113.7, 2001:db8::/48, session:abc123" required autofocus>
+  <button type="submit">Look up</button>
+</form>
+{% else %}
+{% if !notice.is_empty() %}<p class="notice">{{ notice }}</p>{% endif %}
+{% if !error.is_empty() %}<p class="error">{{ error }}</p>{% endif %}
+{% if !canonical.is_empty() %}
+<h1 class="actor">{{ canonical }}</h1>
+
+<div class="grid">
+<section>
+  <h2>What nginx does</h2>
+  <p class="verdict">{% call m::status(effective) %}{% endcall %}
+  {% if effective == "none" %}No decision applies; requests pass.
+  {% else if via_other %}because of <a href="/actor?q={{ matched|urlencode }}">{{ matched }}</a>{% if !effective_reason.is_empty() %}: {{ effective_reason }}{% endif %}
+  {% else %}{% if !effective_reason.is_empty() %}{{ effective_reason }}{% endif %}{% endif %}
+  </p>
+
+  <h2>Decision for this actor</h2>
+  {% if has_decision %}
+  <dl class="facts">
+    <dt>Status</dt><dd>{% call m::status(status) %}{% endcall %}</dd>
+    <dt>Reason</dt><dd class="reason">{{ reason }}</dd>
+    <dt>Created</dt><dd>{{ created }}{% if !by.is_empty() %} by {{ by }}{% endif %}</dd>
+    <dt>Expires</dt><dd title="{{ expires_title }}">{{ expires }}</dd>
+  </dl>
+  {% if !read_only %}
+  <form method="post" action="/clear" class="inline">
+    <input type="hidden" name="actor" value="{{ canonical }}">
+    <button type="submit" class="danger">Clear decision</button>
+  </form>
+  {% endif %}
+  {% else %}
+  <p class="empty">No decision is stored for exactly this actor.</p>
+  {% endif %}
+</section>
+
+{% if !read_only %}
+<section>
+  <h2>{% if has_decision %}Change decision{% else %}Add a decision{% endif %}</h2>
+  {% call m::decision_form(form, "Save") %}{% endcall %}
+</section>
+{% endif %}
+</div>
+
+<h2>History</h2>
+{% if history.is_empty() %}<p class="empty">No changes recorded for this actor.</p>{% else %}
+{% call m::changes_table(history, false) %}{% endcall %}
+{% endif %}
+{% endif %}
+{% endif %}
+{% endblock %}

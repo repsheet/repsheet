@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% import "macros.html" as m %}
+{% block title %}Decisions{% endblock %}
+{% block content %}
+<h1>Decisions <span class="count">{{ total }}</span></h1>
+<form class="filters" method="get" action="/decisions">
+  <select name="status" aria-label="Status">
+    <option value="">any status</option>
+    <option value="block" {% if status == "block" %}selected{% endif %}>block</option>
+    <option value="mark" {% if status == "mark" %}selected{% endif %}>mark</option>
+    <option value="allow" {% if status == "allow" %}selected{% endif %}>allow</option>
+  </select>
+  <select name="type" aria-label="Actor type">
+    <option value="">any type</option>
+    {% for t in types %}<option value="{{ t }}" {% if kind == t.as_str() %}selected{% endif %}>{{ t }}</option>{% endfor %}
+  </select>
+  <input type="search" name="q" value="{{ q }}" placeholder="Filter actor or reason">
+  <select name="sort" aria-label="Sort">
+    <option value="actor" {% if sort != "expires" && sort != "status" %}selected{% endif %}>sort by actor</option>
+    <option value="status" {% if sort == "status" %}selected{% endif %}>sort by status</option>
+    <option value="expires" {% if sort == "expires" %}selected{% endif %}>expiring first</option>
+  </select>
+  <button type="submit">Apply</button>
+</form>
+
+{% if rows.is_empty() %}<p class="empty">No matching decisions.</p>{% else %}
+<table>
+  <thead><tr><th>Actor</th><th>Status</th><th>Reason</th><th>Expires</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td class="actor" title="{{ r.actor }}"><a href="/actor?q={{ r.actor|urlencode }}">{{ r.actor }}</a></td>
+      <td>{% call m::status(r.status) %}{% endcall %}</td>
+      <td class="reason">{{ r.reason }}</td>
+      <td title="{{ r.expires_title }}">{{ r.expires }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if pages > 1 %}
+<nav class="pager">
+  {% if page > 1 %}<a href="/decisions?status={{ status|urlencode }}&amp;type={{ kind|urlencode }}&amp;q={{ q|urlencode }}&amp;sort={{ sort|urlencode }}&amp;page={{ page - 1 }}">← previous</a>{% endif %}
+  <span>page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a href="/decisions?status={{ status|urlencode }}&amp;type={{ kind|urlencode }}&amp;q={{ q|urlencode }}&amp;sort={{ sort|urlencode }}&amp;page={{ page + 1 }}">next →</a>{% endif %}
+</nav>
+{% endif %}
+{% endif %}
+{% endblock %}
