@@ -98,11 +98,29 @@ remove_entry(ngx_http_repsheet_store_t *store, ngx_http_repsheet_entry_t *e)
 }
 
 
+/*
+ * FNV-1a. nginx's murmur hash shifts signed ints and trips UBSan on bytes
+ * >= 0x80, which every IPv4 key above 127.x contains.
+ */
+static uint32_t
+key_hash(u_char *key, size_t len)
+{
+    uint32_t  h = 2166136261u;
+
+    while (len--) {
+        h ^= *key++;
+        h *= 16777619u;
+    }
+
+    return h;
+}
+
+
 static ngx_http_repsheet_entry_t *
 find_entry(ngx_http_repsheet_shctx_t *sh, u_char *key, size_t len)
 {
     ngx_str_t  name = { len, key };
-    uint32_t   hash = ngx_murmur_hash2(key, len);
+    uint32_t   hash = key_hash(key, len);
 
     return (ngx_http_repsheet_entry_t *) ngx_str_rbtree_lookup(&sh->rbtree, &name, hash);
 }
@@ -249,7 +267,7 @@ ngx_http_repsheet_store_set(ngx_http_repsheet_store_t *store, ngx_str_t *actor,
     p = ngx_cpymem(p, canonical, actor_len);
     ngx_memcpy(p, reason->data, reason_len);
 
-    e->sn.node.key = ngx_murmur_hash2(key, key_len);
+    e->sn.node.key = key_hash(key, key_len);
     ngx_rbtree_insert(&sh->rbtree, &e->sn.node);
     ngx_queue_insert_tail(&sh->entries, &e->queue);
     sh->count++;
