@@ -510,7 +510,7 @@ ngx_http_repsheet_redis(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_str_t                      *value = cf->args->elts;
     ngx_url_t                       u;
 
-    if (mcf->configured) {
+    if (mcf->redis.configured) {
         return "is duplicate";
     }
 
@@ -527,20 +527,20 @@ ngx_http_repsheet_redis(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
 #if (NGX_HAVE_UNIX_DOMAIN)
     if (u.family == AF_UNIX) {
-        mcf->unix_path = u.host;
-        mcf->configured = 1;
+        mcf->redis.unix_path = u.host;
+        mcf->redis.configured = 1;
         return NGX_CONF_OK;
     }
 #endif
 
-    mcf->host = u.host;
+    mcf->redis.host = u.host;
     /* hiredis wants a bare IPv6 address, not "[::1]". */
-    if (mcf->host.len > 2 && mcf->host.data[0] == '[') {
-        mcf->host.data++;
-        mcf->host.len -= 2;
+    if (mcf->redis.host.len > 2 && mcf->redis.host.data[0] == '[') {
+        mcf->redis.host.data++;
+        mcf->redis.host.len -= 2;
     }
-    mcf->port = u.port;
-    mcf->configured = 1;
+    mcf->redis.port = u.port;
+    mcf->redis.configured = 1;
     return NGX_CONF_OK;
 }
 
@@ -552,10 +552,10 @@ ngx_http_repsheet_redis_auth(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_str_t                      *value = cf->args->elts;
 
     if (cf->args->nelts == 3) {
-        mcf->user = value[1];
-        mcf->password = value[2];
+        mcf->redis.user = value[1];
+        mcf->redis.password = value[2];
     } else {
-        mcf->password = value[1];
+        mcf->redis.password = value[1];
     }
     return NGX_CONF_OK;
 }
@@ -619,6 +619,8 @@ ngx_http_repsheet_create_main_conf(ngx_conf_t *cf)
         return NULL;
     }
 
+    mcf->redis.magic = NGX_HTTP_REPSHEET_PUBLIC_MAGIC;
+    mcf->redis.version = NGX_HTTP_REPSHEET_PUBLIC_VERSION;
     mcf->timeout = NGX_CONF_UNSET_MSEC;
     mcf->interval = NGX_CONF_UNSET_MSEC;
     mcf->zone_size = NGX_CONF_UNSET_SIZE;
@@ -648,7 +650,7 @@ ngx_http_repsheet_init_main_conf(ngx_conf_t *cf, void *conf)
         return NGX_CONF_ERROR;
     }
 
-    if (!mcf->configured) {
+    if (!mcf->redis.configured) {
         return NGX_CONF_OK;
     }
 

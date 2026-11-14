@@ -6,6 +6,7 @@
 #include <ngx_http.h>
 
 #include "repsheet_actor.h"
+#include "ngx_http_repsheet_public.h"
 
 #define NGX_HTTP_REPSHEET_OFF 0
 #define NGX_HTTP_REPSHEET_ON 1
@@ -47,16 +48,11 @@ typedef struct {
 } ngx_http_repsheet_store_t;
 
 typedef struct {
-    ngx_str_t                    host;          /* empty with a unix socket */
-    ngx_int_t                    port;
-    ngx_str_t                    unix_path;
-    ngx_str_t                    user;
-    ngx_str_t                    password;
+    ngx_http_repsheet_redis_conf_t  redis;     /* must stay first: read by other modules */
     ngx_msec_t                   timeout;
     ngx_msec_t                   interval;
     size_t                       zone_size;
     ngx_shm_zone_t              *zone;
-    ngx_flag_t                   configured;
 } ngx_http_repsheet_main_conf_t;
 
 typedef struct {

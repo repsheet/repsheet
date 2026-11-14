@@ -528,12 +528,12 @@ connect_one(void)
     u_char                          host[NGX_MAXHOSTNAMELEN + 1];
     u_char                          path[NGX_MAX_PATH + 1];
 
-    if (conf->unix_path.len) {
-        ngx_cpystrn(path, conf->unix_path.data, ngx_min(conf->unix_path.len + 1, sizeof(path)));
+    if (conf->redis.unix_path.len) {
+        ngx_cpystrn(path, conf->redis.unix_path.data, ngx_min(conf->redis.unix_path.len + 1, sizeof(path)));
         REDIS_OPTIONS_SET_UNIX(&options, (char *) path);
     } else {
-        ngx_cpystrn(host, conf->host.data, ngx_min(conf->host.len + 1, sizeof(host)));
-        REDIS_OPTIONS_SET_TCP(&options, (char *) host, (int) conf->port);
+        ngx_cpystrn(host, conf->redis.host.data, ngx_min(conf->redis.host.len + 1, sizeof(host)));
+        REDIS_OPTIONS_SET_TCP(&options, (char *) host, (int) conf->redis.port);
     }
 
     ac = redisAsyncConnectWithOptions(&options);
@@ -556,13 +556,13 @@ connect_one(void)
     redisAsyncSetConnectCallback(ac, on_connect);
     redisAsyncSetDisconnectCallback(ac, on_disconnect);
 
-    if (conf->password.len) {
-        if (conf->user.len) {
-            redisAsyncCommand(ac, on_auth, NULL, "AUTH %b %b", conf->user.data, conf->user.len,
-                              conf->password.data, conf->password.len);
+    if (conf->redis.password.len) {
+        if (conf->redis.user.len) {
+            redisAsyncCommand(ac, on_auth, NULL, "AUTH %b %b", conf->redis.user.data, conf->redis.user.len,
+                              conf->redis.password.data, conf->redis.password.len);
         } else {
-            redisAsyncCommand(ac, on_auth, NULL, "AUTH %b", conf->password.data,
-                              conf->password.len);
+            redisAsyncCommand(ac, on_auth, NULL, "AUTH %b", conf->redis.password.data,
+                              conf->redis.password.len);
         }
     }
 
@@ -709,7 +709,7 @@ ngx_http_repsheet_sync_init_process(ngx_cycle_t *cycle)
     }
 
     conf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_repsheet_module);
-    if (conf == NULL || !conf->configured || conf->zone == NULL) {
+    if (conf == NULL || !conf->redis.configured || conf->zone == NULL) {
         return NGX_OK;
     }
 

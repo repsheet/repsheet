@@ -26,7 +26,7 @@ fi
 ngx_module_type=HTTP
 ngx_module_name=ngx_http_repsheet_module
 ngx_module_incs="$ngx_addon_dir/src $REPSHEET_COMMON"
-ngx_module_deps="$ngx_addon_dir/src/ngx_http_repsheet_module.h $REPSHEET_COMMON/repsheet_actor.h"
+ngx_module_deps="$ngx_addon_dir/src/ngx_http_repsheet_module.h $ngx_addon_dir/src/ngx_http_repsheet_public.h $REPSHEET_COMMON/repsheet_actor.h"
 ngx_module_srcs="$ngx_addon_dir/src/ngx_http_repsheet_module.c \
                  $ngx_addon_dir/src/ngx_http_repsheet_store.c \
                  $ngx_addon_dir/src/ngx_http_repsheet_sync.c \
