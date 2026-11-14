@@ -54,7 +54,9 @@ The repository contains three components:
 The nginx module never queries Redis while handling a request. One worker
 keeps the shared memory store in sync:
 
-1. On start it loads everything with `REPSHEET.SNAPSHOT`.
+1. On start it loads everything with `REPSHEET.SNAPSHOT`, a thousand decisions
+   at a time so a large store never blocks Valkey, and keeps serving what it
+   had until the last page is in.
 2. It then follows `REPSHEET.CHANGES` from the last sequence number it applied.
    A pubsub notification wakes it up as soon as a decision changes, and it
    also polls every `repsheet_sync_interval` in case a notification is missed.
@@ -114,6 +116,7 @@ REPSHEET.CLEAR <actor> [BY <who>]               -> 1 if a decision was removed
 REPSHEET.GET   <actor>                          -> map or nil (exact actor only)
 REPSHEET.CHECK <actor> [<actor> ...]            -> [status, reason, matched actor]
 REPSHEET.SNAPSHOT                               -> [epoch, seq, [[actor, status, reason, expires]...]]
+REPSHEET.SNAPSHOT CURSOR <c> [COUNT n]          -> [epoch, seq, next-cursor, [...]] one page
 REPSHEET.CHANGES <epoch> <seq> [COUNT n]        -> ["OK", epoch, seq, [...]] or ["RESYNC"]
 REPSHEET.VERSION
 ```
@@ -128,6 +131,13 @@ OK
 2) "abuse report #4411"
 3) "ip:2001:db8:42::/48"
 ```
+
+`REPSHEET.SNAPSHOT` without `CURSOR` returns everything at once and keeps
+Valkey busy meanwhile (about a second per million decisions). With `CURSOR`
+it returns one page (start at `0`, stop when the next cursor is `0`). Pages
+are not consistent with each other: remember the `seq` of the first page and
+replay `REPSHEET.CHANGES` from it after the last one, as nginx and the admin
+UI do.
 
 `BY` records who made the change, on the decision and in the change log; it is
 optional, at most 256 bytes, and has no effect on enforcement. A new decision
@@ -434,11 +444,10 @@ What this means:
 * **The bot verifier's User-Agent check runs on every request.** Enable
   `pcre_jit on;` (main context): it cut this cost by about 0.65 µs per request
   in our measurements.
-* **Sync of very large stores**: `REPSHEET.SNAPSHOT` of 1M decisions takes
-  about a second in Valkey, longer than the default `repsheet_redis_timeout`
-  (1s), so nginx keeps retrying and never loads them. Raise
-  `repsheet_redis_timeout` above the snapshot time if you hold that many
-  decisions (the `store-1m` scenario uses 10s).
+* **Large stores sync in pages.** nginx loads 1M decisions in about 3
+  seconds, a thousand at a time; no page keeps Valkey busy for more than about
+  2 ms. (Before paging, one snapshot of 1M decisions held Valkey for over a
+  second and exceeded `repsheet_redis_timeout`, so it never finished.)
 
 ## Building
 

@@ -4,11 +4,18 @@
  * Exactly one worker (worker 0) runs the sync loop, using non-blocking
  * hiredis connections driven by the nginx event loop:
  *
- *   - a command connection that takes a REPSHEET.SNAPSHOT when it has no
- *     state, then polls REPSHEET.CHANGES every repsheet_sync_interval;
+ *   - a command connection that loads a snapshot when it has no state,
+ *     then polls REPSHEET.CHANGES every repsheet_sync_interval;
  *   - a subscriber connection on {repsheet}:notify that triggers an
  *     immediate poll when a decision changes, so updates land in
  *     milliseconds while polling guarantees nothing is lost.
+ *
+ * The snapshot is read in pages (REPSHEET.SNAPSHOT CURSOR ...), so a large
+ * store neither blocks Valkey nor times out. Pages are not consistent with
+ * each other, so the loop remembers the change log position of the first
+ * page and, once the last page is in, replays REPSHEET.CHANGES from there.
+ * Until then the store keeps serving the decisions it had; entries not seen
+ * in the snapshot are removed at the end.
  *
  * Requests never wait on Redis. If Redis is unavailable the store keeps
  * serving the last known decisions and the loop reconnects with backoff.
@@ -16,6 +23,7 @@
 #include "ngx_http_repsheet_redis.h"
 
 #define CHANGES_PAGE 1000
+#define SNAPSHOT_PAGE 1000
 #define EXPIRE_EVERY 10000      /* ms between sweeps of expired entries */
 #define MAX_BACKOFF 30000
 
@@ -34,6 +42,14 @@ typedef struct {
     ngx_flag_t                      more;
     ngx_msec_t                      backoff;
     ngx_msec_t                      last_expire;
+
+    /* A paged snapshot in progress. */
+    ngx_flag_t                      paging;
+    char                            cursor[24];
+    u_char                          page_epoch[17];
+    int64_t                         page_seq;     /* change log position of the first page */
+    uint64_t                        generation;
+    size_t                          loaded;
 } sync_t;
 
 static sync_t  sync_state;
@@ -126,10 +142,9 @@ on_snapshot(redisAsyncContext *ac, void *r, void *privdata)
 {
     redisReply                 *reply = r, *entries, *e;
     ngx_http_repsheet_shctx_t  *sh;
-    ngx_str_t                   epoch, actor, status_str, reason;
+    ngx_str_t                   epoch, cursor, actor, status_str, reason;
     rs_status_t                 status;
     int64_t                     seq, expires;
-    uint64_t                    generation;
     size_t                      i;
 
     sync_state.busy = 0;
@@ -139,18 +154,36 @@ on_snapshot(redisAsyncContext *ac, void *r, void *privdata)
 
     sh = sync_state.store->sh;
 
-    if (reply->type != REDIS_REPLY_ARRAY || reply->elements != 3
-        || !reply_str(reply->element[0], &epoch) || epoch.len >= sizeof(sh->epoch)
+    /* [epoch, seq, next-cursor, [[actor, status, reason, expires], ...]] */
+    if (reply->type != REDIS_REPLY_ARRAY || reply->elements != 4
+        || !reply_str(reply->element[0], &epoch) || epoch.len >= sizeof(sync_state.page_epoch)
         || !reply_int(reply->element[1], &seq)
-        || reply->element[2]->type != REDIS_REPLY_ARRAY)
+        || !reply_str(reply->element[2], &cursor) || cursor.len >= sizeof(sync_state.cursor)
+        || reply->element[3]->type != REDIS_REPLY_ARRAY)
     {
+        sync_state.paging = 0;
         sync_failed("REPSHEET.SNAPSHOT", reply);
         return;
     }
 
-    entries = reply->element[2];
-    generation = ngx_http_repsheet_store_begin_snapshot(sync_state.store);
+    if (sync_state.loaded == 0 && sync_state.cursor[0] == '0' && sync_state.cursor[1] == '\0') {
+        /* First page: where the change log replay will start. */
+        ngx_memcpy(sync_state.page_epoch, epoch.data, epoch.len);
+        sync_state.page_epoch[epoch.len] = '\0';
+        sync_state.page_seq = seq;
 
+    } else if (ngx_strlen(sync_state.page_epoch) != epoch.len
+               || ngx_strncmp(sync_state.page_epoch, epoch.data, epoch.len) != 0)
+    {
+        /* Flushed or replaced while paging: start over. */
+        ngx_log_error(NGX_LOG_NOTICE, sync_state.log, 0,
+                      "repsheet: dataset changed during the snapshot, starting again");
+        sync_state.paging = 0;
+        schedule(0);
+        return;
+    }
+
+    entries = reply->element[3];
     for (i = 0; i < entries->elements; i++) {
         e = entries->element[i];
         if (e->type != REDIS_REPLY_ARRAY || e->elements != 4
@@ -164,20 +197,31 @@ on_snapshot(redisAsyncContext *ac, void *r, void *privdata)
         }
         ngx_http_repsheet_store_set(sync_state.store, &actor, status, &reason, expires,
                                     sync_state.log);
+        sync_state.loaded++;
     }
 
-    ngx_http_repsheet_store_end_snapshot(sync_state.store, generation);
+    ngx_memcpy(sync_state.cursor, cursor.data, cursor.len);
+    sync_state.cursor[cursor.len] = '\0';
+    sync_state.backoff = 0;
 
-    ngx_memcpy(sh->epoch, epoch.data, epoch.len);
-    sh->epoch[epoch.len] = '\0';
-    sh->seq = seq;
+    if (!(cursor.len == 1 && cursor.data[0] == '0')) {
+        schedule(0);   /* next page */
+        return;
+    }
+
+    /* Last page: drop what the snapshot did not contain, then replay changes. */
+    ngx_http_repsheet_store_end_snapshot(sync_state.store, sync_state.generation);
+
+    ngx_memcpy(sh->epoch, sync_state.page_epoch, sizeof(sh->epoch));
+    sh->seq = sync_state.page_seq;
     sync_state.have_state = 1;
+    sync_state.paging = 0;
     (void) ngx_atomic_fetch_add(&sh->counters.snapshots, 1);
     mark_synced();
 
     ngx_log_error(NGX_LOG_NOTICE, sync_state.log, 0,
                   "repsheet: loaded snapshot with %uz decisions (epoch %s, seq %L)",
-                  entries->elements, sh->epoch, sh->seq);
+                  sync_state.loaded, sh->epoch, sh->seq);
 
     schedule(0);
 }
@@ -279,7 +323,15 @@ poll_redis(void)
     int                         rc;
 
     if (!sync_state.have_state) {
-        rc = redisAsyncCommand(sync_state.cmd, on_snapshot, NULL, "REPSHEET.SNAPSHOT");
+        if (!sync_state.paging) {
+            sync_state.paging = 1;
+            sync_state.loaded = 0;
+            sync_state.cursor[0] = '0';
+            sync_state.cursor[1] = '\0';
+            sync_state.generation = ngx_http_repsheet_store_begin_snapshot(sync_state.store);
+        }
+        rc = redisAsyncCommand(sync_state.cmd, on_snapshot, NULL, "REPSHEET.SNAPSHOT CURSOR %s COUNT %d",
+                               sync_state.cursor, SNAPSHOT_PAGE);
     } else {
         rc = redisAsyncCommand(sync_state.cmd, on_changes, NULL, "REPSHEET.CHANGES %s %lld COUNT %d",
                                (char *) sh->epoch, (long long) sh->seq, CHANGES_PAGE);
@@ -428,6 +480,8 @@ connect_redis(void)
 static void
 disconnect(const char *why)
 {
+    sync_state.paging = 0;
+
     /* Safe from inside reply callbacks: hiredis defers the free. */
     if (sync_state.cmd) {
         redisAsyncDisconnect(sync_state.cmd);
@@ -456,6 +510,7 @@ free_connections(void)
     sync_state.sub = NULL;
     sync_state.cmd_ready = 0;
     sync_state.busy = 0;
+    sync_state.paging = 0;    /* a new connection starts the snapshot over */
 }
 
 

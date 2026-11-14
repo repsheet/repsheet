@@ -17,6 +17,7 @@
  * or replaced, the epoch changes and consumers know to take a new snapshot.
  */
 #include <stdbool.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -371,33 +372,36 @@ static int CheckCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc)
 }
 
 /* ------------------------------------------------------------------------ */
-/* REPSHEET.SNAPSHOT                                                         */
+/* REPSHEET.SNAPSHOT [CURSOR <c> [COUNT <n>]]                                */
 /*                                                                           */
-/* Replies [epoch, seq, [[actor, status, reason, expires], ...]] atomically. */
-/* Read-only, so enforcement points may sync from a replica.               */
+/* Without CURSOR: replies [epoch, seq, [[actor, status, reason, expires]..]]*/
+/* atomically. Valkey is busy for as long as that takes (about 1s per        */
+/* million decisions), so large stores should be read in pages:              */
+/*                                                                           */
+/* With CURSOR: replies [epoch, seq, next-cursor, [entries]] for one page,   */
+/* walking the index with SSCAN (start at "0", stop when next-cursor is "0").*/
+/* Pages are not a consistent snapshot by themselves: the caller remembers   */
+/* the seq of the first page and, after the last one, applies               */
+/* REPSHEET.CHANGES from it, which repairs anything that changed meanwhile.  */
+/* An actor may appear on more than one page.                                */
+/*                                                                           */
+/* Read-only, so enforcement points may sync from a replica.                 */
 /* ------------------------------------------------------------------------ */
 
-static int SnapshotCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc) {
-  if (argc != 1) return RedisModule_WrongArity(ctx);
-  RedisModule_AutoMemory(ctx);
+#define DEFAULT_SNAPSHOT_PAGE 1000
+#define MAX_SNAPSHOT_PAGE 10000
 
-  char epoch[EPOCH_LEN + 1];
-  ensure_epoch(ctx, epoch, false);
-
-  RedisModule_ReplyWithArray(ctx, 3);
-  RedisModule_ReplyWithCString(ctx, epoch);
-  RedisModule_ReplyWithLongLong(ctx, current_seq(ctx));
-  RedisModule_ReplyWithArray(ctx, REDISMODULE_POSTPONED_LEN);
-
-  RedisModuleCallReply* members = RedisModule_Call(ctx, "SMEMBERS", "c", KEY_INDEX);
+/* Reply with the decisions of the actors in `members` (an array call reply). */
+static void reply_entries(RedisModuleCtx* ctx, RedisModuleCallReply* members) {
   size_t n = RedisModule_CallReplyLength(members);
   long emitted = 0;
 
+  RedisModule_ReplyWithArray(ctx, REDISMODULE_POSTPONED_LEN);
   for (size_t i = 0; i < n; i++) {
     size_t len;
     const char* s = RedisModule_CallReplyStringPtr(RedisModule_CallReplyArrayElement(members, i), &len);
     char actor[RS_ACTOR_MAX + 1];
-    if (len > RS_ACTOR_MAX) continue;
+    if (s == NULL || len > RS_ACTOR_MAX) continue;
     memcpy(actor, s, len);
     actor[len] = '\0';
 
@@ -411,8 +415,57 @@ static int SnapshotCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int ar
     RedisModule_ReplyWithLongLong(ctx, d.expires);
     emitted++;
   }
-
   RedisModule_ReplySetArrayLength(ctx, emitted);
+}
+
+static int SnapshotCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc) {
+  if (argc != 1 && argc != 3 && argc != 5) return RedisModule_WrongArity(ctx);
+  RedisModule_AutoMemory(ctx);
+
+  RedisModuleString* cursor = NULL;
+  long long count = DEFAULT_SNAPSHOT_PAGE;
+
+  if (argc >= 3) {
+    if (!arg_is(argv[1], "CURSOR")) return RedisModule_ReplyWithError(ctx, "ERR syntax error, expected CURSOR");
+    size_t len;
+    const char* s = RedisModule_StringPtrLen(argv[2], &len);
+    char* end = NULL;
+    errno = 0;
+    (void)strtoull(s, &end, 10);
+    if (len == 0 || len > 20 || end != s + len || s[0] == '-' || errno != 0) {
+      return RedisModule_ReplyWithError(ctx, "ERR invalid cursor");
+    }
+    cursor = argv[2];
+  }
+  if (argc == 5) {
+    if (!arg_is(argv[3], "COUNT") || RedisModule_StringToLongLong(argv[4], &count) != REDISMODULE_OK ||
+        count < 1 || count > MAX_SNAPSHOT_PAGE) {
+      return RedisModule_ReplyWithError(ctx, "ERR COUNT must be between 1 and 10000");
+    }
+  }
+
+  char epoch[EPOCH_LEN + 1];
+  ensure_epoch(ctx, epoch, false);
+
+  if (cursor == NULL) {
+    RedisModule_ReplyWithArray(ctx, 3);
+    RedisModule_ReplyWithCString(ctx, epoch);
+    RedisModule_ReplyWithLongLong(ctx, current_seq(ctx));
+    reply_entries(ctx, RedisModule_Call(ctx, "SMEMBERS", "c", KEY_INDEX));
+    return REDISMODULE_OK;
+  }
+
+  RedisModuleCallReply* scan = RedisModule_Call(ctx, "SSCAN", "cscl", KEY_INDEX, cursor, "COUNT", count);
+  if (scan == NULL || RedisModule_CallReplyType(scan) != REDISMODULE_REPLY_ARRAY ||
+      RedisModule_CallReplyLength(scan) != 2) {
+    return RedisModule_ReplyWithError(ctx, "ERR could not scan the index");
+  }
+
+  RedisModule_ReplyWithArray(ctx, 4);
+  RedisModule_ReplyWithCString(ctx, epoch);
+  RedisModule_ReplyWithLongLong(ctx, current_seq(ctx));
+  RedisModule_ReplyWithCallReply(ctx, RedisModule_CallReplyArrayElement(scan, 0));
+  reply_entries(ctx, RedisModule_CallReplyArrayElement(scan, 1));
   return REDISMODULE_OK;
 }
 

@@ -262,13 +262,7 @@ pub fn build(name: &str) -> Option<Scenario> {
         "store-0" => store(0),
         "store-10k" => store(10_000),
         "store-100k" => store(100_000),
-        "store-1m" => Scenario {
-            // A 1M-decision REPSHEET.SNAPSHOT takes about 1s in Valkey, longer
-            // than the default repsheet_redis_timeout, so sync would never finish.
-            // The longer timeout lets this measure lookups at 1M decisions.
-            http: "repsheet_redis_timeout 10s;".into(),
-            ..store(1_000_000)
-        },
+        "store-1m" => store(1_000_000),
         "networks" => networks(),
         "actors" => actors(),
         "sync" => Scenario {

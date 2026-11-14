@@ -235,6 +235,51 @@ class TestSync:
         assert m["repsheet_decisions"] == 501
         assert m["repsheet_sync_snapshots_total"] == 1
 
+    def test_snapshot_is_loaded_in_pages(self, nginx_factory, r):
+        pipe = r.pipeline(transaction=False)
+        for i in range(5000):
+            pipe.execute_command("REPSHEET.MARK", f"10.1.{i // 256}.{i % 256}")
+        pipe.execute_command("REPSHEET.BLOCK", "127.0.0.1")
+        pipe.execute()
+        n = nginx_factory(conf())
+        wait_status(n, 403)
+        wait_for(lambda: metrics(n)["repsheet_decisions"] == 5001, message="all pages")
+        assert metrics(n)["repsheet_sync_snapshots_total"] == 1
+        assert "loaded snapshot with 5001 decisions" in n.error_log()
+
+    def test_changes_during_paging_are_not_lost(self, nginx_factory, r):
+        """Decisions added and cleared while nginx pages through the snapshot
+        are repaired by replaying the change log from the first page."""
+        import threading
+
+        pipe = r.pipeline(transaction=False)
+        for i in range(20000):
+            pipe.execute_command("REPSHEET.MARK", f"10.2.{i // 256}.{i % 256}")
+        pipe.execute()
+
+        stop = threading.Event()
+
+        def churn():
+            k = 0
+            while not stop.is_set():
+                r.execute_command("REPSHEET.MARK", f"10.3.{k // 256 % 256}.{k % 256}")
+                r.execute_command("REPSHEET.CLEAR", f"10.2.{k // 256 % 78}.{k % 256}")
+                k += 1
+
+        t = threading.Thread(target=churn)
+        t.start()
+        try:
+            n = nginx_factory(conf())
+            synced(n)
+            time.sleep(0.3)
+        finally:
+            stop.set()
+            t.join()
+
+        expected = r.scard("{repsheet}:index")
+        wait_for(lambda: metrics(n)["repsheet_decisions"] == expected, timeout=10,
+                 message=f"nginx to hold exactly the {expected} decisions in valkey")
+
     def test_large_burst_pages_through_changes(self, nginx, r):
         pipe = r.pipeline(transaction=False)
         for i in range(2500):

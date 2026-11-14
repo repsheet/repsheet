@@ -35,6 +35,10 @@ repository. History from both is preserved.
   using nginx's asynchronous resolver, and records a `block` (or `mark`)
   decision `BY bot_verifier` for those that fail. `repsheet_bot_verifier*`
   directives, `$repsheet_bot_verifier_*` variables and metrics.
+- `REPSHEET.SNAPSHOT CURSOR <c> [COUNT n]` returns the store one page at a
+  time. nginx and the admin UI load snapshots in pages and replay the change
+  log from the first page, so a large store (1M decisions: ~1,000 pages,
+  ~2 ms each) neither blocks Valkey nor exceeds `repsheet_redis_timeout`.
 - `repsheet-bench` (`make bench`): measures the CPU Repsheet adds per request
   against nginx without it, across store sizes, networks, actors, sync churn
   and the bot verifier.

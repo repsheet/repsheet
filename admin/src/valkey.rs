@@ -273,21 +273,52 @@ impl Valkey {
         })
     }
 
+    /// The whole store, read in pages so Valkey is never busy for long.
+    ///
+    /// Pages are not consistent with each other: the returned seq is the one
+    /// of the first page, and replaying REPSHEET.CHANGES from it (as the
+    /// mirror does next) repairs anything that changed while paging. If the
+    /// dataset is flushed or replaced meanwhile, paging starts over.
     pub async fn snapshot(&self) -> Result<Snapshot> {
-        let v = self.query(&redis::cmd("REPSHEET.SNAPSHOT")).await?;
+        const PAGE: u64 = 1000;
         let bad = || unexpected("REPSHEET.SNAPSHOT");
-        let a = as_array(&v).filter(|a| a.len() == 3).ok_or_else(bad)?;
-        let entries = as_array(&a[2])
-            .ok_or_else(bad)?
-            .iter()
-            .map(|e| parse_entry(as_array(e)?))
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(bad)?;
-        Ok(Snapshot {
-            epoch: as_string(&a[0]).ok_or_else(bad)?,
-            seq: as_int(&a[1]).ok_or_else(bad)? as u64,
-            entries,
-        })
+        'start: loop {
+            let (mut cursor, mut first): (String, Option<(String, u64)>) = ("0".into(), None);
+            let mut entries: std::collections::HashMap<String, Entry> =
+                std::collections::HashMap::new();
+            loop {
+                let v = self
+                    .query(
+                        redis::cmd("REPSHEET.SNAPSHOT")
+                            .arg("CURSOR")
+                            .arg(&cursor)
+                            .arg("COUNT")
+                            .arg(PAGE),
+                    )
+                    .await?;
+                let a = as_array(&v).filter(|a| a.len() == 4).ok_or_else(bad)?;
+                let epoch = as_string(&a[0]).ok_or_else(bad)?;
+                let seq = as_int(&a[1]).ok_or_else(bad)? as u64;
+                match &first {
+                    None => first = Some((epoch, seq)),
+                    Some((e, _)) if *e != epoch => continue 'start,
+                    Some(_) => {}
+                }
+                for e in as_array(&a[3]).ok_or_else(bad)? {
+                    let entry = parse_entry(as_array(e).ok_or_else(bad)?).ok_or_else(bad)?;
+                    entries.insert(entry.actor.clone(), entry);
+                }
+                cursor = as_string(&a[2]).ok_or_else(bad)?;
+                if cursor == "0" {
+                    let (epoch, seq) = first.ok_or_else(bad)?;
+                    return Ok(Snapshot {
+                        epoch,
+                        seq,
+                        entries: entries.into_values().collect(),
+                    });
+                }
+            }
+        }
     }
 
     pub async fn changes(&self, epoch: &str, seq: u64, count: u64) -> Result<Changes> {

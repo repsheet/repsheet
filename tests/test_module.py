@@ -211,6 +211,44 @@ class TestSync:
         args = ["COUNT", count] if count else []
         return r.execute_command("REPSHEET.CHANGES", epoch, seq, *args)
 
+    def pages(self, r, count=500):
+        """Walk REPSHEET.SNAPSHOT CURSOR ...; returns (epochs, seqs, entries, pages)."""
+        cursor, entries, epochs, seqs, pages = "0", {}, set(), set(), 0
+        while True:
+            epoch, seq, cursor, page = r.execute_command("REPSHEET.SNAPSHOT", "CURSOR", cursor, "COUNT", count)
+            epochs.add(epoch)
+            seqs.add(seq)
+            pages += 1
+            entries.update({e[0]: e[1:] for e in page})
+            if str(cursor) == "0":
+                return epochs, seqs, entries, pages
+
+    def test_paged_snapshot_matches_full(self, r):
+        pipe = r.pipeline(transaction=False)
+        for i in range(2500):
+            pipe.execute_command("REPSHEET.MARK", f"10.0.{i // 256}.{i % 256}", "REASON", f"r{i}")
+        pipe.execute_command("REPSHEET.BLOCK", "192.0.2.0/24", "TTL", "100")
+        pipe.execute()
+        epoch, seq, full = self.snapshot(r)
+        epochs, seqs, paged, pages = self.pages(r, count=500)
+        assert epochs == {epoch} and seqs == {seq}
+        assert paged == full and len(paged) == 2501
+        assert pages > 2
+
+    def test_paged_snapshot_skips_expired_and_empty(self, r):
+        assert self.pages(r)[2] == {}
+        r.execute_command("REPSHEET.BLOCK", "1.1.1.1", "TTL", "1")
+        time.sleep(1.2)
+        assert self.pages(r)[2] == {}
+
+    @pytest.mark.parametrize("args", [
+        ["CURSOR"], ["CURSOR", "abc"], ["CURSOR", "-1"], ["CURSOR", "0", "COUNT", "0"],
+        ["CURSOR", "0", "COUNT", "10001"], ["CURSOR", "0", "LIMIT", "5"], ["FROM", "0"],
+    ])
+    def test_paged_snapshot_bad_arguments(self, r, args):
+        with pytest.raises(redis.ResponseError):
+            r.execute_command("REPSHEET.SNAPSHOT", *args)
+
     def test_empty_dataset(self, r):
         epoch, seq, entries = self.snapshot(r)
         assert (epoch, seq, entries) == ("", 0, {})
