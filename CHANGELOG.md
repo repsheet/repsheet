@@ -1,6 +1,6 @@
 # Changelog
 
-## 5.0.0 (unreleased)
+## 6.0.0 (unreleased)
 
 A rewrite that merges `repsheet-nginx` and `redis_module` into one
 repository. History from both is preserved.
@@ -40,8 +40,8 @@ repository. History from both is preserved.
 - Unchecked TTL parsing; read-only commands registered as writes.
 - Build failures on GCC ≥ 10 (`-fno-common`) and nginx ≥ 1.23.
 
-### Upgrading from 4.x
-| 4.x | 5.0 |
+### Upgrading from 5.x
+| 5.x | 6.0 |
 |-----|-----|
 | `REPSHEET.BLACKLIST ip reason [ttl]` | `REPSHEET.BLOCK ip REASON reason [TTL ttl]` |
 | `REPSHEET.WHITELIST ...` | `REPSHEET.ALLOW ...` |
@@ -52,10 +52,15 @@ repository. History from both is preserved.
 | `repsheet_proxy_headers*` | `set_real_ip_from` / `real_ip_header` (realip module) |
 | `X-Repsheet` request header on marked actors | `proxy_set_header X-Repsheet $repsheet_reason;` |
 
-Keys from 4.x (`<ip>:repsheet:ip:<list>`) are not read. Re-create decisions
+Keys written by the old Redis module (`<ip>:repsheet:ip:<list>`) are not read. Re-create decisions
 with the new commands, for example by scanning the old keys.
 
 ## Earlier releases (nginx module)
+
+The 5.x releases were not recorded here. 5.0.0 (2018-11-30) moved lookups
+to the Redis module's `REPSHEET.STATUS` command; 5.0.1 and 5.0.2 (December
+2018) fixed the marked-actor header; 5.1.0 (2019-06-23) used the module's
+updated status response.
 
 2015-12-30  Aaron Bedra  <aaron@aaronbedra.com>
 

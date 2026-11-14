@@ -230,9 +230,9 @@ CI covers Valkey 9.1 and Redis 8.10, nginx 1.30 (stable) and 1.31
 
 ## History
 
-The nginx module dates back to 2014 (versions 1.0 to 4.2) and the Redis
-module to 2016. Version 5 merges both into one repository and is a rewrite. See [CHANGELOG.md](CHANGELOG.md)
-for what changed and how to migrate. The history of both original
+The nginx module dates back to 2014 (versions 1.0 to 5.1) and the Redis
+module to 2016. Version 6 merges both into one repository and is a rewrite.
+See [CHANGELOG.md](CHANGELOG.md) for what changed and how to migrate. The history of both original
 repositories is preserved in this one.
 
 ## License

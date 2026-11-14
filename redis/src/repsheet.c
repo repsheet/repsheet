@@ -25,7 +25,7 @@
 #include "redismodule.h"
 #include "repsheet_actor.h"
 
-#define REPSHEET_VERSION "5.0.0"
+#define REPSHEET_VERSION "6.0.0"
 #define REPSHEET_VERSION_NUM 50000
 
 #define KEY_PREFIX "{repsheet}:actor:"

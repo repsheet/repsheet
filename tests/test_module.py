@@ -14,7 +14,7 @@ def get(r, actor):
 
 
 def test_version(r):
-    assert r.execute_command("REPSHEET.VERSION") == "5.0.0"
+    assert r.execute_command("REPSHEET.VERSION") == "6.0.0"
 
 
 @pytest.mark.parametrize("command,status", [
