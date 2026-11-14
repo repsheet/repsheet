@@ -1,42 +1,26 @@
-ifndef RM_INCLUDE_DIR
-	RM_INCLUDE_DIR=./
+CC ?= cc
+UNAME_S := $(shell uname -s)
+
+CFLAGS ?= -O2 -g
+CFLAGS += -std=c11 -D_DEFAULT_SOURCE -fPIC -fvisibility=hidden -Wall -Wextra -Wno-unused-parameter \
+          -Iinclude -I../common
+ifeq ($(UNAME_S),Darwin)
+  SHOBJ_LDFLAGS ?= -bundle -undefined dynamic_lookup
+else
+  SHOBJ_LDFLAGS ?= -shared -Wl,-Bsymbolic
 endif
 
-ifndef RMUTIL_LIBDIR
-	RMUTIL_LIBDIR=rmutil
-endif
-
-ifndef SRC_DIR
-	SRC_DIR=src
-endif
+OBJS = src/repsheet.o ../common/repsheet_actor.o
 
 all: repsheet.so
 
-repsheet.so:
-	$(MAKE) -C ./$(SRC_DIR)
-	cp ./$(SRC_DIR)/repsheet.so .
+repsheet.so: $(OBJS)
+	$(CC) -o $@ $(OBJS) $(SHOBJ_LDFLAGS) $(LDFLAGS)
 
-run: repsheet.so
-	redis-server --loadmodule src/repsheet.so
+src/repsheet.o: src/repsheet.c include/redismodule.h ../common/repsheet_actor.h
+../common/repsheet_actor.o: ../common/repsheet_actor.c ../common/repsheet_actor.h
 
-.PHONY: docker
-docker:
-	docker build -t repsheet-redis .
+clean:
+	rm -f repsheet.so $(OBJS)
 
-.PHONY: docker-run
-docker-run: docker
-	docker run -p 6379:6379 repsheet-redis
-
-virtualenv:
-	virtualenv -p python3 venv
-	venv/bin/pip install -r requirements.txt
-
-test: FORCE
-	venv/bin/pytest -v --disable-warnings test
-
-clean: FORCE
-	rm -rf *.xo *.so *.o
-	rm -rf ./$(SRC_DIR)/*.xo ./$(SRC_DIR)/*.so ./$(SRC_DIR)/*.o
-	rm -rf ./$(RMUTIL_LIBDIR)/*.so ./$(RMUTIL_LIBDIR)/*.o ./$(RMUTIL_LIBDIR)/*.a
-
-FORCE:
+.PHONY: all clean

@@ -1,0 +1,7 @@
+.deps/
+*.o
+*.so
+.venv/
+__pycache__/
+.pytest_cache/
+dump.rdb
