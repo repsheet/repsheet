@@ -60,7 +60,7 @@ equal status, the most specific one wins.
 ## Quick start (Docker)
 
 ```sh
-docker compose -f examples/docker-compose.yml up --build
+make docker-up                                  # or: docker compose -f examples/docker-compose.yml up --build -d
 curl -i localhost:8080/                         # 200
 
 # Find the address nginx sees for you (the Docker gateway), then block it.
@@ -71,7 +71,8 @@ curl -i localhost:8080/                         # 403
 curl -s localhost:8080/metrics
 ```
 
-The admin UI is on http://localhost:8090.
+The admin UI is on http://localhost:8090. `make docker-logs` follows the logs
+and `make docker-down` stops everything.
 
 `examples/` also shows how to pass marks to an upstream and how to rate limit
 marked actors.
@@ -224,10 +225,15 @@ Things to know:
 * **Activity**: the change log, newest first.
 
 ```sh
-make admin
-admin/target/release/repsheet-admin --redis redis://10.0.0.5:6379
+make run-admin REDIS=redis://10.0.0.5:6379      # builds it, then runs it
 # open http://127.0.0.1:8090
 ```
+
+To try it locally without an existing server, run `make run-valkey` (Valkey
+from `.deps/` with the module loaded, data in memory only) in one terminal
+and `make run-admin` in another. Extra options go in `ADMIN_ARGS`, for example
+`make run-admin ADMIN_ARGS="--read-only"`. The binary itself is
+`admin/target/release/repsheet-admin`.
 
 It keeps its own in-memory copy of the decisions, synced the same way as
 nginx, so lists stay fast with hundreds of thousands of decisions.
@@ -284,6 +290,10 @@ make bootstrap   # fetch + build pinned hiredis, Valkey and nginx into .deps/
 make             # build redis/repsheet.so, nginx with the module, and repsheet-admin
 make test        # pytest suite against real Valkey, nginx and the admin UI
 make sanitize    # the same suite with ASan/UBSan on the module, Valkey and nginx
+
+make run-valkey  # Valkey with the module on 127.0.0.1:6379 (VALKEY_PORT=...)
+make run-admin   # the admin UI on 127.0.0.1:8090 (REDIS=..., ADMIN_ARGS=...)
+make docker-up   # Valkey + nginx + admin UI in Docker; docker-logs, docker-down
 ```
 
 The nginx module builds statically (`--add-module=/path/to/repsheet/nginx`)
