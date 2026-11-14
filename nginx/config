@@ -1,20 +1,36 @@
 ngx_addon_name=ngx_http_repsheet_module
 
-if test -n "$ngx_module_link"; then
-    ngx_module_type=HTTP
-    ngx_module_name=ngx_http_repsheet_module
-    ngx_module_srcs="$ngx_addon_dir/ngx_http_repsheet_module.c \
-                     $ngx_addon_dir/ngx_http_repsheet_cache.c  \
-		     $ngx_addon_dir/ngx_http_repsheet_lookup.c \
-		     $ngx_addon_dir/ngx_http_repsheet_xff.c"
-    ngx_module_libs="-lhiredis"
+REPSHEET_COMMON="$ngx_addon_dir/../common"
 
-    . auto/module
-else
-    HTTP_MODULES="$HTTP_MODULES ngx_http_repsheet_module"
-    NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ngx_http_repsheet_module.c \
-                                    $ngx_addon_dir/ngx_http_repsheet_cache.c  \
-				    $ngx_addon_dir/ngx_http_repsheet_lookup.c \
-				    $ngx_addon_dir/ngx_http_repsheet_xff.c"
-    CORE_LIBS="$CORE_LIBS -lhiredis"
+ngx_feature="hiredis"
+ngx_feature_name=
+ngx_feature_run=no
+ngx_feature_incs="#include <hiredis/hiredis.h>
+#include <hiredis/async.h>"
+ngx_feature_path=
+ngx_feature_libs="-lhiredis"
+ngx_feature_test="redisOptions o = {0}; redisAsyncContext *c = redisAsyncConnectWithOptions(&o); (void) c;"
+. auto/feature
+
+if [ $ngx_found = no ]; then
+    cat << END
+
+$0: error: the repsheet module requires hiredis >= 1.0 (headers and library).
+Install libhiredis-dev / hiredis-devel, or pass its location with
+--with-cc-opt="-I<prefix>/include" --with-ld-opt="-L<prefix>/lib".
+
+END
+    exit 1
 fi
+
+ngx_module_type=HTTP
+ngx_module_name=ngx_http_repsheet_module
+ngx_module_incs="$ngx_addon_dir/src $REPSHEET_COMMON"
+ngx_module_deps="$ngx_addon_dir/src/ngx_http_repsheet_module.h $REPSHEET_COMMON/repsheet_actor.h"
+ngx_module_srcs="$ngx_addon_dir/src/ngx_http_repsheet_module.c \
+                 $ngx_addon_dir/src/ngx_http_repsheet_store.c \
+                 $ngx_addon_dir/src/ngx_http_repsheet_sync.c \
+                 $REPSHEET_COMMON/repsheet_actor.c"
+ngx_module_libs="-lhiredis"
+
+. auto/module

@@ -49,6 +49,11 @@ def server_binary():
     env = os.environ.get("REPSHEET_SERVER")
     if env:
         return env
+    if os.environ.get("SANITIZE") == "1":
+        asan = DEPS / "asan" / "bin" / "valkey-server"
+        if not asan.exists():
+            pytest.exit("SANITIZE=1 needs script/bootstrap asan", 2)
+        return str(asan)
     for name in ("valkey-server", "redis-server"):
         local = DEPS / "prefix" / "bin" / name
         if local.exists():
@@ -60,9 +65,10 @@ def server_binary():
 
 
 class Server:
-    def __init__(self, tmp, module_args=()):
-        self.port = free_port()
+    def __init__(self, tmp, module_args=(), port=None, module=True, extra=(), password=None):
+        self.port = port or free_port()
         self.dir = tmp
+        load = ["--loadmodule", str(MODULE), *module_args] if module else []
         args = [
             server_binary(),
             "--port", str(self.port),
@@ -71,17 +77,27 @@ class Server:
             "--appendonly", "no",
             "--repl-diskless-sync-delay", "0",
             "--dir", str(tmp),
-            "--loadmodule", str(MODULE), *module_args,
+            *load, *extra,
         ]
-        self.log = open(tmp / "server.log", "w")
-        self.proc = subprocess.Popen(args, stdout=self.log, stderr=subprocess.STDOUT)
-        self.client = redis.Redis(port=self.port, decode_responses=True)
+        if password:
+            args += ["--requirepass", password]
+        self.log_path = tmp / "server.log"
+        self.log = open(self.log_path, "a")
+        env = dict(os.environ)
+        if os.environ.get("SANITIZE") == "1":
+            env["ASAN_OPTIONS"] = "detect_leaks=0"
+            env["UBSAN_OPTIONS"] = "print_stacktrace=1"
+        self.proc = subprocess.Popen(args, stdout=self.log, stderr=subprocess.STDOUT, env=env)
+        self.client = redis.Redis(port=self.port, decode_responses=True, password=password)
         wait_for(self.client.ping, message="server to start")
 
     def stop(self):
         self.proc.terminate()
         self.proc.wait(timeout=10)
         self.log.close()
+        text = self.log_path.read_text()
+        for marker in ("AddressSanitizer", "repsheet.c:", "repsheet_actor.c:", "BUG REPORT"):
+            assert marker not in text, f"server log contains {marker!r}:\n{text[-6000:]}"
 
 
 @pytest.fixture(scope="session")
@@ -112,6 +128,27 @@ def nginx_binary():
     if local.exists():
         return str(local)
     pytest.skip("nginx with repsheet not built; run script/bootstrap")
+
+
+OUR_CODE = ("ngx_http_repsheet_", "repsheet_actor", "hiredis-")
+
+
+def sanitizer_problem(text):
+    """Return the offending report if `text` shows a crash, a memory error, or
+    undefined behaviour involving repsheet or hiredis code. UBSan reports that
+    are entirely inside nginx core are known and benign (memcpy of 0 bytes)."""
+    if "exited on signal" in text:
+        return text[-4000:]
+    if "AddressSanitizer" in text:
+        i = text.index("AddressSanitizer")
+        return text[max(0, i - 200): i + 6000]
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if "runtime error:" in line:
+            block = "\n".join(lines[i: i + 25])
+            if any(s in block for s in OUR_CODE):
+                return block
+    return None
 
 
 class Nginx:
@@ -153,10 +190,16 @@ http {{
 """
         (self.dir / "nginx.conf").write_text(conf)
         cmd = [nginx_binary(), "-p", str(self.dir), "-c", str(self.dir / "nginx.conf")]
-        check = subprocess.run([*cmd, "-t"], capture_output=True, text=True)
+        env = dict(os.environ)
+        # nginx intentionally does not free its configuration at exit, so leak
+        # detection is off; ASan memory errors and UBSan reports still count.
+        san = f"log_path={self.dir}/sanitizer:print_stacktrace=1"
+        env["ASAN_OPTIONS"] = san + ":detect_leaks=0"
+        env["UBSAN_OPTIONS"] = san
+        check = subprocess.run([*cmd, "-t"], capture_output=True, text=True, env=env)
         if check.returncode != 0:
             raise RuntimeError(f"nginx config test failed:\n{check.stderr}")
-        self.proc = subprocess.Popen(cmd, stderr=subprocess.DEVNULL)
+        self.proc = subprocess.Popen(cmd, stderr=subprocess.DEVNULL, env=env)
         self.url = f"http://127.0.0.1:{self.port}"
         wait_for(lambda: requests.get(self.url + "/__ready", timeout=1) is not None,
                  message="nginx to start")
@@ -177,18 +220,19 @@ http {{
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.proc.wait()
-        log = self.error_log()
-        # Sanitizer reports and worker crashes must fail the test run.
-        for marker in ("AddressSanitizer", "runtime error:", "exited on signal"):
-            assert marker not in log, f"nginx error log contains {marker!r}:\n{log[-4000:]}"
+        texts = [p.read_text() for p in sorted(self.dir.glob("sanitizer*"))]
+        texts.append(self.error_log())  # nginx sends stderr to its error log
+        for text in texts:
+            problem = sanitizer_problem(text)
+            assert problem is None, f"sanitizer or crash report:\n{problem}"
 
 
 @pytest.fixture
 def nginx_factory(server, tmp_path):
     started = []
 
-    def make(http, workers=2):
-        n = Nginx(tmp_path, server.port, http, workers)
+    def make(http, workers=2, redis_port=None):
+        n = Nginx(tmp_path, redis_port or server.port, http, workers)
         started.append(n)
         return n
 

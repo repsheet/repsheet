@@ -2,4 +2,12 @@
 -D_DEFAULT_SOURCE
 -Iredis/include
 -Icommon
+-Inginx/src
 -I.deps/prefix/include
+-I.deps/src/nginx-1.30.6/src/core
+-I.deps/src/nginx-1.30.6/src/event
+-I.deps/src/nginx-1.30.6/src/event/modules
+-I.deps/src/nginx-1.30.6/src/os/unix
+-I.deps/src/nginx-1.30.6/src/http
+-I.deps/src/nginx-1.30.6/src/http/modules
+-I.deps/src/nginx-1.30.6/objs

@@ -167,12 +167,26 @@ class TestSync:
     def test_empty_dataset(self, r):
         epoch, seq, entries = self.snapshot(r)
         assert (epoch, seq, entries) == ("", 0, {})
-        assert self.changes(r, "", 0) == ["OK", 0, []]
+        assert self.changes(r, "", 0) == ["OK", "", 0, []]
 
-    def test_first_write_after_empty_snapshot_forces_resync(self, r):
+    def test_follows_log_from_empty_dataset(self, r):
         self.snapshot(r)
         r.execute_command("REPSHEET.BLOCK", "1.1.1.1")
-        assert self.changes(r, "", 0) == ["RESYNC"]
+        epoch = self.snapshot(r)[0]
+        ok, got_epoch, cursor, changes = self.changes(r, "", 0)
+        assert (ok, got_epoch, cursor) == ("OK", epoch, 1)
+        assert changes[0][:3] == [1, "set", "ip:1.1.1.1"]
+
+    def test_empty_epoch_resyncs_once_log_is_incomplete(self, tmp_path):
+        from conftest import Server
+        s = Server(tmp_path, module_args=["changelog-max", "1"])
+        try:
+            s.client.execute_command("REPSHEET.BLOCK", "1.1.1.1")
+            s.client.execute_command("REPSHEET.BLOCK", "2.2.2.2")
+            assert s.client.execute_command("REPSHEET.CHANGES", "", 0) == ["RESYNC"]
+            assert s.client.execute_command("REPSHEET.CHANGES", "", 1) == ["RESYNC"]
+        finally:
+            s.stop()
 
     def test_snapshot(self, r):
         r.execute_command("REPSHEET.BLOCK", "1.1.1.1", "REASON", "a")
@@ -187,11 +201,11 @@ class TestSync:
     def test_incremental_changes(self, r):
         r.execute_command("REPSHEET.BLOCK", "1.1.1.1")
         epoch, seq, _ = self.snapshot(r)
-        assert self.changes(r, epoch, seq) == ["OK", seq, []]
+        assert self.changes(r, epoch, seq) == ["OK", epoch, seq, []]
 
         r.execute_command("REPSHEET.MARK", "2.2.2.2", "REASON", "r", "TTL", "60")
         r.execute_command("REPSHEET.CLEAR", "1.1.1.1")
-        ok, cursor, changes = self.changes(r, epoch, seq)
+        ok, _, cursor, changes = self.changes(r, epoch, seq)
         assert ok == "OK" and cursor == seq + 2
         assert changes[0][:5] == [seq + 1, "set", "ip:2.2.2.2", "mark", "r"]
         assert int(changes[0][5]) > 0
@@ -203,9 +217,9 @@ class TestSync:
         epoch = self.snapshot(r)[0]
         for i in range(5):
             r.execute_command("REPSHEET.BLOCK", f"2.2.2.{i}")
-        ok, cursor, changes = self.changes(r, epoch, 1, count=2)
+        ok, _, cursor, changes = self.changes(r, epoch, 1, count=2)
         assert [c[0] for c in changes] == [2, 3] and cursor == 3
-        ok, cursor, changes = self.changes(r, epoch, cursor, count=10)
+        ok, _, cursor, changes = self.changes(r, epoch, cursor, count=10)
         assert [c[0] for c in changes] == [4, 5, 6]
 
     def test_wrong_epoch_resyncs(self, r):

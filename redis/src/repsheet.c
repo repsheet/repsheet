@@ -385,9 +385,13 @@ static int SnapshotCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int ar
 /* ------------------------------------------------------------------------ */
 /* REPSHEET.CHANGES <epoch> <seq> [COUNT n]                                  */
 /*                                                                           */
-/* Replies ["OK", seq, [[seq, op, actor, status, reason, expires], ...]]     */
+/* Replies ["OK", epoch, seq, [[seq, op, actor, status, reason, expires]..]] */
 /* with changes after <seq>, or ["RESYNC"] if the caller must take a new     */
 /* snapshot (different epoch, or the log was trimmed past <seq>).            */
+/*                                                                           */
+/* A caller that synced an empty dataset (epoch "", seq 0) can follow the    */
+/* log from the first write without a new snapshot, as long as the log is    */
+/* still complete; it adopts the epoch returned here.                        */
 /* ------------------------------------------------------------------------ */
 
 static int reply_resync(RedisModuleCtx *ctx) {
@@ -442,8 +446,8 @@ static int ChangesCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int arg
   ensure_epoch(ctx, epoch, false);
   size_t elen;
   const char *client_epoch = RedisModule_StringPtrLen(argv[1], &elen);
-  /* An empty epoch means "no data yet"; it is valid until the first write. */
-  if (elen != strlen(epoch) || memcmp(client_epoch, epoch, elen) != 0) {
+  bool from_empty = elen == 0 && since == 0;
+  if (!from_empty && (elen != strlen(epoch) || memcmp(client_epoch, epoch, elen) != 0)) {
     return reply_resync(ctx);
   }
 
@@ -464,8 +468,9 @@ static int ChangesCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int arg
   size_t n = entries ? RedisModule_CallReplyLength(entries) : 0;
   long long cursor = since;
 
-  RedisModule_ReplyWithArray(ctx, 3);
+  RedisModule_ReplyWithArray(ctx, 4);
   RedisModule_ReplyWithSimpleString(ctx, "OK");
+  RedisModule_ReplyWithCString(ctx, epoch);
   if (n > 0) cursor = entry_seq(RedisModule_CallReplyArrayElement(entries, n - 1));
   RedisModule_ReplyWithLongLong(ctx, cursor);
   RedisModule_ReplyWithArray(ctx, (long)n);

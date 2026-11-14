@@ -4,6 +4,7 @@
 #
 #   script/bootstrap            fetch + build hiredis, valkey and nginx
 #   script/bootstrap nginx      rebuild nginx (with the repsheet module) only
+#   script/bootstrap asan       sanitizer builds: valkey (ASan) + nginx (ASan/UBSan)
 #   script/bootstrap clean      remove .deps/
 #
 # Environment overrides:
@@ -53,6 +54,19 @@ build_valkey() {
   make -C "$SRC/valkey-${VALKEY_VERSION}" PREFIX="$PREFIX" install >/dev/null
 }
 
+# Valkey built with ASan, so a sanitized module can be loaded (a regular build
+# dlopens modules with RTLD_DEEPBIND, which ASan does not support).
+build_valkey_asan() {
+  if [[ -x "$DEPS/asan/bin/valkey-server" ]]; then return; fi
+  fetch "https://github.com/valkey-io/valkey/archive/refs/tags/${VALKEY_VERSION}.tar.gz" \
+    "$SRC/valkey-${VALKEY_VERSION}"
+  log "building valkey ${VALKEY_VERSION} with ASan"
+  rm -rf "$SRC/valkey-asan" && cp -r "$SRC/valkey-${VALKEY_VERSION}" "$SRC/valkey-asan"
+  make -C "$SRC/valkey-asan" distclean >/dev/null 2>&1 || true
+  make -C "$SRC/valkey-asan" -j"$JOBS" BUILD_TLS=no SANITIZER=address MALLOC=libc >/dev/null
+  make -C "$SRC/valkey-asan" PREFIX="$DEPS/asan" install >/dev/null
+}
+
 build_nginx() {
   fetch "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" "$SRC/nginx-${NGINX_VERSION}"
   log "building nginx ${NGINX_VERSION} with repsheet"
@@ -75,8 +89,6 @@ build_nginx() {
       --with-http_realip_module \
       --with-cc-opt="$cc_opt" \
       --with-ld-opt="$ld_opt" \
-      --without-http_rewrite_module \
-      --without-http_gzip_module \
       "$add_module" >/dev/null
     make -j"$JOBS" >/dev/null
     make install >/dev/null
@@ -86,8 +98,9 @@ build_nginx() {
 
 case "${1:-all}" in
   all)    build_hiredis; build_valkey; build_nginx ;;
+  asan)   build_hiredis; build_valkey_asan; SANITIZE=1 build_nginx ;;
   deps)   build_hiredis; build_valkey ;;
   nginx)  build_nginx ;;
   clean)  rm -rf "$DEPS" ;;
-  *)      echo "usage: $0 [all|deps|nginx|clean]" >&2; exit 1 ;;
+  *)      echo "usage: $0 [all|deps|nginx|asan|clean]" >&2; exit 1 ;;
 esac

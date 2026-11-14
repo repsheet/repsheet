@@ -4,6 +4,10 @@ UNAME_S := $(shell uname -s)
 CFLAGS ?= -O2 -g
 CFLAGS += -std=c11 -D_DEFAULT_SOURCE -fPIC -fvisibility=hidden -Wall -Wextra -Wno-unused-parameter \
           -Iinclude -I../common
+ifeq ($(SANITIZE),1)
+  CFLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer
+  LDFLAGS += -fsanitize=address,undefined
+endif
 ifeq ($(UNAME_S),Darwin)
   SHOBJ_LDFLAGS ?= -bundle -undefined dynamic_lookup
 else
