@@ -14,7 +14,7 @@ env:
 jobs:
   test:
     name: ${{ matrix.server }} / nginx ${{ matrix.nginx }}${{ matrix.dynamic == '1' && ' (dynamic)' || '' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -74,7 +74,7 @@ jobs:
 
   sanitize:
     name: ASan / UBSan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
