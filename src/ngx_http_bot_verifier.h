@@ -21,6 +21,12 @@
 #define BV_MAX_INFLIGHT 1024 /* concurrent lookups per worker */
 #define BV_REASON_MAX 160
 
+/* Lookup duration histogram (seconds): Prometheus "le" bounds, in ms. */
+#define BV_BUCKETS 11
+#define BV_BUCKET_BOUNDS_MS { 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000 }
+#define BV_TIMED_REDIS 0
+#define BV_TIMED_DNS 1
+
 typedef enum {
     BV_OFF = 0,
     BV_ON,
@@ -67,6 +73,10 @@ typedef struct {
     ngx_atomic_t  redis_errors;
     ngx_atomic_t  reports;
     ngx_atomic_t  evictions;
+    /* lookups answered by Redis or DNS: duration histogram, sum (ms), count */
+    ngx_atomic_t  duration_buckets[2][BV_BUCKETS];
+    ngx_atomic_t  duration_sum_ms[2];
+    ngx_atomic_t  duration_count[2];
 } bv_counters_t;
 
 typedef struct {
@@ -145,6 +155,8 @@ typedef struct {
     ngx_flag_t             waiting;
     ngx_flag_t             starting;   /* inside bv_verify: do not resume */
     ngx_flag_t             counted;
+    ngx_msec_t             started;    /* when the request began waiting */
+    ngx_msec_t             waited;     /* ms spent waiting for a lookup */
     ngx_queue_t            wait;       /* in the lookup's waiters */
     ngx_http_request_t    *request;
 } bv_ctx_t;
@@ -165,6 +177,7 @@ ngx_flag_t bv_cache_get(bv_cache_t *cache, bv_addr_t *addr, bv_verdict_t *out);
 void bv_cache_put(bv_cache_t *cache, bv_addr_t *addr, bv_verdict_t *v, time_t ttl);
 
 /* verify.c */
+void bv_ctx_cleanup(void *data);
 ngx_int_t bv_verify(ngx_http_request_t *r, bv_ctx_t *ctx, bv_provider_t *provider,
     bv_addr_t *addr, struct sockaddr *sa, socklen_t socklen);
 ngx_int_t bv_verify_init_process(ngx_cycle_t *cycle);

@@ -366,6 +366,7 @@ SERVER = """
         real_ip_header X-Real-IP;
         add_header X-Result $bot_verifier_result always;
         add_header X-Provider $bot_verifier_provider always;
+        add_header X-Time $bot_verifier_time always;
 
         location / {
             %(location)s

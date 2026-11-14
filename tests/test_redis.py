@@ -50,7 +50,10 @@ class TestRedisCache:
         resp = b.get(ip=GOOGLE_IP, ua=GOOGLEBOT)
         assert (resp.status_code, resp.headers["X-Result"]) == (200, "verified")
         assert len(dns.reverse_queries(GOOGLE_IP)) == 1
-        assert metrics(b)['bot_verifier_answers_total{source="redis"}'] == 1
+        mb = metrics(b)
+        assert mb['bot_verifier_answers_total{source="redis"}'] == 1
+        assert mb['bot_verifier_lookup_duration_seconds_count{source="redis"}'] == 1
+        assert mb['bot_verifier_lookup_duration_seconds_bucket{source="redis",le="0.100"}'] == 1
 
     def test_shared_failure_blocks_without_dns(self, dns, r, server, nginx_factory):
         r.set("{bot_verifier}:203.0.113.77", "failed:google", ex=60)

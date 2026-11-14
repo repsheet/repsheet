@@ -100,10 +100,22 @@ http {
 nginx refuses to start if `bot_verifier` is on where no `resolver` is
 configured.
 
-Variables: `$bot_verifier_result` (`verified`, `failed`, `unknown`, or empty
-when the request made no claim) and `$bot_verifier_provider` (the claimed
-provider). Use them in logs, `map`s, `limit_req` keys, or to tell the
-application which crawler it is serving.
+Variables:
+
+* `$bot_verifier_result`: `verified`, `failed`, `unknown`, or empty when the
+  request made no claim.
+* `$bot_verifier_provider`: the claimed provider.
+* `$bot_verifier_time`: seconds the request waited for verification, with
+  millisecond resolution like `$request_time`. `0.000` when the answer was
+  cached or in the published ranges.
+
+Use them in logs, `map`s, `limit_req` keys, or to tell the application which
+crawler it is serving. For example, to see what verification costs:
+
+```nginx
+log_format bots '$remote_addr "$http_user_agent" $status '
+                'bot=$bot_verifier_result/$bot_verifier_provider wait=$bot_verifier_time';
+```
 
 ### Results
 
@@ -201,6 +213,7 @@ if it is missing the error is logged once per worker.
 | `bot_verifier_requests_total{result}` | Requests that claimed to be a crawler. |
 | `bot_verifier_blocked_total` | Requests rejected (excludes monitor mode). |
 | `bot_verifier_answers_total{source}` | Where results came from: `zone`, `ranges`, `redis`, `dns`, `none` (too many lookups in flight). |
+| `bot_verifier_lookup_duration_seconds{source}` | Histogram of how long lookups took, by where the answer came from (`redis` or `dns`). Answers from shared memory or the published ranges take no time and are not included. |
 | `bot_verifier_dns_queries_total`, `bot_verifier_dns_errors_total` | DNS activity. |
 | `bot_verifier_redis_errors_total`, `bot_verifier_repsheet_reports_total` | Redis activity. |
 | `bot_verifier_cache_entries`, `bot_verifier_cache_evictions_total` | The shared-memory cache. |
@@ -218,6 +231,11 @@ if it is missing the error is logged once per worker.
   their DNS TTL (or `valid=`). Point it at a resolver you trust.
 * **Load.** At most 1024 lookups run at once per worker; beyond that requests
   get `unknown`. Concurrent requests for the same address share one lookup.
+* **Tuning.** Every address that claims to be a crawler costs one lookup per
+  `bot_verifier_ttl`. If `bot_verifier_lookup_duration_seconds{source="dns"}`
+  is high, use a closer resolver, load the published ranges, share results
+  through Redis, or raise the TTLs. Failed and unknown lookups are also logged
+  with their duration.
 
 ## Building
 

@@ -269,3 +269,58 @@ class TestConfig:
     def test_repsheet_requires_redis(self, nginx_factory):
         with pytest.raises(RuntimeError, match="requires repsheet_redis or bot_verifier_redis"):
             nginx_factory(http="bot_verifier_repsheet mark;")
+
+
+class TestTiming:
+    """#9: how long verification takes, per request and per lookup."""
+
+    def test_wait_time_and_histogram(self, dns, nginx_factory):
+        dns.record(GOOGLE_IP, GOOGLE_HOST)
+        dns.delay = 0.3   # per query: reverse + forward
+        n = nginx_factory()
+        first = n.get(ip=GOOGLE_IP, ua=GOOGLEBOT)
+        assert first.headers["X-Result"] == "verified"
+        assert 0.55 <= float(first.headers["X-Time"]) < 2.0
+        cached = n.get(ip=GOOGLE_IP, ua=GOOGLEBOT)
+        assert cached.headers["X-Time"] == "0.000"
+
+        m = metrics(n)
+        h = "bot_verifier_lookup_duration_seconds"
+        assert m[f'{h}_count{{source="dns"}}'] == 1
+        assert 0.55 <= m[f'{h}_sum{{source="dns"}}'] < 2.0
+        assert m[f'{h}_bucket{{source="dns",le="0.500"}}'] == 0
+        assert m[f'{h}_bucket{{source="dns",le="1.000"}}'] == 1
+        assert m[f'{h}_bucket{{source="dns",le="+Inf"}}'] == 1
+        assert m[f'{h}_count{{source="redis"}}'] == 0
+
+    def test_no_time_without_a_claim(self, dns, nginx_factory):
+        n = nginx_factory()
+        assert n.get(ip="203.0.113.9", ua=BROWSER).headers.get("X-Time", "") == ""
+
+    def test_duration_in_log(self, dns, nginx_factory):
+        import re
+        n = nginx_factory()
+        n.get(ip="203.0.113.9", ua=GOOGLEBOT)
+        assert re.search(r"203\.0\.113\.9 failed verification, claimed google: no reverse DNS \(\d+ms\)",
+                         n.error_log())
+
+    def test_joined_requests_report_their_own_wait(self, dns, nginx_factory):
+        dns.record(GOOGLE_IP, GOOGLE_HOST)
+        dns.delay = 0.4
+        n = nginx_factory()
+        times = []
+
+        def go():
+            times.append(float(n.get(ip=GOOGLE_IP, ua=GOOGLEBOT).headers["X-Time"]))
+
+        first = threading.Thread(target=go)
+        first.start()
+        wait_for(lambda: dns.reverse_queries(GOOGLE_IP), message="lookup started")
+        import time
+        time.sleep(0.3)
+        second = threading.Thread(target=go)
+        second.start()
+        first.join()
+        second.join()
+        assert len(times) == 2 and min(times) < max(times) - 0.2
+        assert len(dns.reverse_queries(GOOGLE_IP)) == 1

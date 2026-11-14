@@ -28,6 +28,7 @@ typedef struct {
     ngx_str_t             host;
     u_char                host_buf[256];
     ngx_log_t            *log;
+    ngx_msec_t            started;
 } bv_lookup_t;
 
 static ngx_queue_t  bv_inflight;
@@ -74,8 +75,9 @@ bv_resume(ngx_http_request_t *r)
 }
 
 
-static void
-bv_request_cleanup(void *data)
+/* Request pool cleanup; also how the context is found again after an internal redirect. */
+void
+bv_ctx_cleanup(void *data)
 {
     bv_ctx_t *ctx = data;
 
@@ -83,6 +85,31 @@ bv_request_cleanup(void *data)
         ngx_queue_remove(&ctx->wait);
         ctx->waiting = 0;
     }
+}
+
+
+static void
+bv_record_duration(bv_source_e source, ngx_msec_t ms)
+{
+    static const ngx_msec_t  bounds[BV_BUCKETS] = BV_BUCKET_BOUNDS_MS;
+    bv_counters_t           *c = &bv_cache()->sh->counters;
+    ngx_uint_t               which, i;
+
+    if (source == BV_SRC_REDIS) {
+        which = BV_TIMED_REDIS;
+    } else if (source == BV_SRC_DNS) {
+        which = BV_TIMED_DNS;
+    } else {
+        return;
+    }
+
+    /* Buckets are not cumulative here; the metrics handler sums them. */
+    for (i = 0; i < BV_BUCKETS && ms > bounds[i]; i++) { /* void */ }
+    if (i < BV_BUCKETS) {
+        (void) ngx_atomic_fetch_add(&c->duration_buckets[which][i], 1);
+    }
+    (void) ngx_atomic_fetch_add(&c->duration_sum_ms[which], ms);
+    (void) ngx_atomic_fetch_add(&c->duration_count[which], 1);
 }
 
 
@@ -95,6 +122,9 @@ bv_finish(bv_lookup_t *lk, bv_result_e result, bv_source_e source, const char *f
     ngx_queue_t         *q;
     u_char               reason[BV_REASON_MAX], addr[NGX_INET6_ADDRSTRLEN], *e;
     ngx_str_t            reason_str, addr_str;
+    ngx_msec_t           elapsed = ngx_current_msec - lk->started;
+
+    bv_record_duration(source, elapsed);
 
     if (lk->timer.timer_set) {
         ngx_del_timer(&lk->timer);
@@ -122,14 +152,14 @@ bv_finish(bv_lookup_t *lk, bv_result_e result, bv_source_e source, const char *f
         addr_str.len = bv_addr_format(&lk->addr, addr, sizeof(addr));
 
         if (result == BV_FAILED) {
-            ngx_log_error(NGX_LOG_WARN, lk->log, 0, "bot_verifier: %V failed verification, %V", &addr_str,
-                          &reason_str);
+            ngx_log_error(NGX_LOG_WARN, lk->log, 0, "bot_verifier: %V failed verification, %V (%Mms)",
+                          &addr_str, &reason_str, elapsed);
         } else if (result == BV_UNKNOWN) {
-            ngx_log_error(NGX_LOG_INFO, lk->log, 0, "bot_verifier: %V could not be verified, %V", &addr_str,
-                          &reason_str);
+            ngx_log_error(NGX_LOG_INFO, lk->log, 0, "bot_verifier: %V could not be verified, %V (%Mms)",
+                          &addr_str, &reason_str, elapsed);
         } else {
-            ngx_log_debug2(NGX_LOG_DEBUG_HTTP, lk->log, 0, "bot_verifier: %V verified, %V", &addr_str,
-                           &reason_str);
+            ngx_log_debug3(NGX_LOG_DEBUG_HTTP, lk->log, 0, "bot_verifier: %V verified, %V (%Mms)", &addr_str,
+                           &reason_str, elapsed);
         }
 
         if (result != BV_UNKNOWN) {
@@ -151,6 +181,7 @@ bv_finish(bv_lookup_t *lk, bv_result_e result, bv_source_e source, const char *f
         ctx->waiting = 0;
         ctx->verdict = v;
         ctx->source = source;
+        ctx->waited = ngx_current_msec - ctx->started;
         if (!ctx->starting) {
             bv_resume(ctx->request);
         }
@@ -373,7 +404,6 @@ bv_verify(ngx_http_request_t *r, bv_ctx_t *ctx, bv_provider_t *provider, bv_addr
     bv_verdict_t               cached;
     bv_lookup_t               *lk;
     ngx_queue_t               *q;
-    ngx_pool_cleanup_t        *cln;
 
     ctx->verdict.provider = provider->index;
 
@@ -406,13 +436,8 @@ bv_verify(ngx_http_request_t *r, bv_ctx_t *ctx, bv_provider_t *provider, bv_addr
         return NGX_OK;
     }
 
-    cln = ngx_pool_cleanup_add(r->pool, 0);
-    if (cln == NULL) {
-        return NGX_ERROR;
-    }
-    cln->handler = bv_request_cleanup;
-    cln->data = ctx;
     ctx->request = r;
+    ctx->started = ngx_current_msec;
 
     /* 3. join a lookup in progress */
     for (q = ngx_queue_head(&bv_inflight); q != ngx_queue_sentinel(&bv_inflight); q = ngx_queue_next(q)) {
@@ -447,6 +472,7 @@ bv_verify(ngx_http_request_t *r, bv_ctx_t *ctx, bv_provider_t *provider, bv_addr
     lk->resolver = clcf->resolver;
     lk->timeout = lcf->timeout;
     lk->log = ngx_cycle->log;
+    lk->started = ngx_current_msec;
     ngx_queue_init(&lk->waiters);
     lk->timer.handler = bv_redis_timeout;
     lk->timer.data = lk;

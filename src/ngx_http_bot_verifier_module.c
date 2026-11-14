@@ -214,6 +214,30 @@ bv_client_addr(ngx_connection_t *c, bv_addr_t *out)
 /* request handler                                                           */
 /* ------------------------------------------------------------------------ */
 
+/*
+ * An internal redirect (index, try_files, error_page) clears module contexts.
+ * Like the realip module, find ours again through its pool cleanup so the
+ * request keeps its result and timing and is not evaluated twice.
+ */
+static bv_ctx_t *
+bv_get_ctx(ngx_http_request_t *r)
+{
+    ngx_pool_cleanup_t  *cln;
+    bv_ctx_t            *ctx;
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_bot_verifier_module);
+    if (ctx == NULL && (r->internal || r->filter_finalize)) {
+        for (cln = r->pool->cleanup; cln; cln = cln->next) {
+            if (cln->handler == bv_ctx_cleanup) {
+                ctx = cln->data;
+                ngx_http_set_ctx(r, ctx, ngx_http_bot_verifier_module);
+                break;
+            }
+        }
+    }
+    return ctx;
+}
+
 static ngx_int_t
 bv_decide(ngx_http_request_t *r, bv_ctx_t *ctx, bv_loc_conf_t *lcf)
 {
@@ -221,7 +245,7 @@ bv_decide(ngx_http_request_t *r, bv_ctx_t *ctx, bv_loc_conf_t *lcf)
 
     ctx->evaluated = 1;
 
-    if (!ctx->counted && !r->internal) {
+    if (!ctx->counted) {
         ctx->counted = 1;
         (void) ngx_atomic_fetch_add(&counters->requests[ctx->verdict.result], 1);
         (void) ngx_atomic_fetch_add(&counters->hits[ctx->source], 1);
@@ -247,16 +271,17 @@ ngx_http_bot_verifier_handler(ngx_http_request_t *r)
 {
     bv_loc_conf_t   *lcf;
     bv_ctx_t        *ctx;
-    bv_provider_t   *provider;
-    bv_addr_t        addr;
-    ngx_int_t        rc;
+    bv_provider_t       *provider;
+    bv_addr_t            addr;
+    ngx_int_t            rc;
+    ngx_pool_cleanup_t  *cln;
 
     lcf = ngx_http_get_module_loc_conf(r, ngx_http_bot_verifier_module);
     if (lcf->mode == BV_OFF || r != r->main) {
         return NGX_DECLINED;
     }
 
-    ctx = ngx_http_get_module_ctx(r, ngx_http_bot_verifier_module);
+    ctx = bv_get_ctx(r);
     if (ctx) {
         if (ctx->waiting) {
             return NGX_AGAIN;   /* woken by an unrelated event; still waiting */
@@ -275,10 +300,13 @@ ngx_http_bot_verifier_handler(ngx_http_request_t *r)
         return NGX_DECLINED;
     }
 
-    ctx = ngx_pcalloc(r->pool, sizeof(bv_ctx_t));
-    if (ctx == NULL) {
+    cln = ngx_pool_cleanup_add(r->pool, sizeof(bv_ctx_t));
+    if (cln == NULL) {
         return NGX_DECLINED;
     }
+    ctx = cln->data;
+    ngx_memzero(ctx, sizeof(bv_ctx_t));
+    cln->handler = bv_ctx_cleanup;
     ngx_http_set_ctx(r, ctx, ngx_http_bot_verifier_module);
 
     rc = bv_verify(r, ctx, provider, &addr, r->connection->sockaddr, r->connection->socklen);
@@ -303,13 +331,22 @@ ngx_http_bot_verifier_handler(ngx_http_request_t *r)
 static ngx_int_t
 bv_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v, uintptr_t data)
 {
-    bv_ctx_t        *ctx = ngx_http_get_module_ctx(r, ngx_http_bot_verifier_module);
+    bv_ctx_t        *ctx = bv_get_ctx(r);
     bv_provider_t   *p;
     const char      *s = "";
 
     if (ctx && ctx->evaluated && bv_mcf) {
         if (data == 0) {
             s = bv_result_name(ctx->verdict.result);
+        } else if (data == 2) {
+            /* Seconds spent waiting for verification, like $request_time. */
+            v->data = ngx_pnalloc(r->pool, NGX_TIME_T_LEN + 4);
+            if (v->data == NULL) {
+                return NGX_ERROR;
+            }
+            v->len = ngx_sprintf(v->data, "%T.%03M", (time_t) (ctx->waited / 1000), ctx->waited % 1000)
+                     - v->data;
+            goto done;
         } else {
             p = bv_mcf->providers.elts;
             v->data = p[ctx->verdict.provider].name.data;
@@ -332,6 +369,7 @@ done:
 static ngx_http_variable_t bv_vars[] = {
     { ngx_string("bot_verifier_result"), NULL, bv_variable, 0, NGX_HTTP_VAR_NOCACHEABLE, 0 },
     { ngx_string("bot_verifier_provider"), NULL, bv_variable, 1, NGX_HTTP_VAR_NOCACHEABLE, 0 },
+    { ngx_string("bot_verifier_time"), NULL, bv_variable, 2, NGX_HTTP_VAR_NOCACHEABLE, 0 },
     ngx_http_null_variable
 };
 
@@ -389,7 +427,7 @@ ngx_http_bot_verifier_metrics_handler(ngx_http_request_t *r)
     free_bytes = cache->shpool->pfree << ngx_pagesize_shift;
     ngx_shmtx_unlock(&cache->shpool->mutex);
 
-    b = ngx_create_temp_buf(r->pool, 4096);
+    b = ngx_create_temp_buf(r->pool, 8192);
     if (b == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
@@ -438,6 +476,34 @@ ngx_http_bot_verifier_metrics_handler(ngx_http_request_t *r)
         "# TYPE bot_verifier_zone_free_bytes gauge\n"
         "bot_verifier_zone_free_bytes %uz\n",
         c->dns_lookups, c->dns_errors, c->redis_errors, c->reports, count, c->evictions, total, free_bytes);
+
+    b->last = ngx_sprintf(b->last,
+        "# HELP bot_verifier_lookup_duration_seconds Time to answer a lookup that was not in shared memory "
+        "or the published ranges, by where the answer came from.\n"
+        "# TYPE bot_verifier_lookup_duration_seconds histogram\n");
+    {
+        static const ngx_msec_t   bounds[BV_BUCKETS] = BV_BUCKET_BOUNDS_MS;
+        static const char        *names[2] = { "redis", "dns" };
+        ngx_atomic_uint_t         cumulative;
+        ngx_uint_t                w, k;
+
+        for (w = 0; w < 2; w++) {
+            cumulative = 0;
+            for (k = 0; k < BV_BUCKETS; k++) {
+                cumulative += c->duration_buckets[w][k];
+                b->last = ngx_sprintf(b->last,
+                    "bot_verifier_lookup_duration_seconds_bucket{source=\"%s\",le=\"%M.%03M\"} %uA\n",
+                    names[w], bounds[k] / 1000, bounds[k] % 1000, cumulative);
+            }
+            b->last = ngx_sprintf(b->last,
+                "bot_verifier_lookup_duration_seconds_bucket{source=\"%s\",le=\"+Inf\"} %uA\n"
+                "bot_verifier_lookup_duration_seconds_sum{source=\"%s\"} %uA.%03uA\n"
+                "bot_verifier_lookup_duration_seconds_count{source=\"%s\"} %uA\n",
+                names[w], c->duration_count[w],
+                names[w], c->duration_sum_ms[w] / 1000, c->duration_sum_ms[w] % 1000,
+                names[w], c->duration_count[w]);
+        }
+    }
 
     r->headers_out.status = NGX_HTTP_OK;
     r->headers_out.content_length_n = b->last - b->pos;

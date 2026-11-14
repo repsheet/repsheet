@@ -38,8 +38,11 @@ A rewrite. Configuration is not compatible with 0.0.x (see below).
 - IPv6.
 - `bot_verifier monitor`, `bot_verifier_block_status`, `bot_verifier_ttl`,
   `bot_verifier_timeout`.
-- `$bot_verifier_result` and `$bot_verifier_provider`.
-- `bot_verifier_metrics` (Prometheus).
+- `$bot_verifier_result`, `$bot_verifier_provider` and `$bot_verifier_time`
+  (how long the request waited for verification).
+- `bot_verifier_metrics` (Prometheus), including a histogram of lookup
+  durations by source (#9). Failed and unknown lookups are logged with their
+  duration.
 - Reporting to Repsheet 6 (`REPSHEET.MARK`/`BLOCK ... BY bot_verifier`),
   replacing the removed `REPSHEET.BLACKLIST`.
 - With the Repsheet nginx module loaded, its `repsheet_redis` and
