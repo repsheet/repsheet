@@ -5,6 +5,7 @@
 #   script/bootstrap            fetch + build hiredis, valkey and nginx
 #   script/bootstrap nginx      rebuild nginx (with the repsheet module) only
 #   script/bootstrap asan       sanitizer builds: valkey (ASan) + nginx (ASan/UBSan)
+#   script/bootstrap bench      optimized nginx for benchmarks in .deps/nginx-bench
 #   script/bootstrap clean      remove .deps/
 #
 # Environment overrides:
@@ -96,11 +97,33 @@ build_nginx() {
   log "nginx installed at $DEPS/nginx/sbin/nginx"
 }
 
+# Optimized, without debug logging: what production runs. Built from its own
+# copy of the sources so it does not disturb the development build.
+build_nginx_bench() {
+  fetch "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" "$SRC/nginx-${NGINX_VERSION}"
+  log "building optimized nginx ${NGINX_VERSION} with repsheet for benchmarks"
+  rm -rf "$SRC/nginx-bench" && cp -r "$SRC/nginx-${NGINX_VERSION}" "$SRC/nginx-bench"
+  (
+    cd "$SRC/nginx-bench"
+    make clean >/dev/null 2>&1 || true
+    ./configure \
+      --prefix="$DEPS/nginx-bench" \
+      --with-http_realip_module \
+      --with-cc-opt="-O2 -g -Wall -Wextra -Wno-unused-parameter -Werror -I$PREFIX/include" \
+      --with-ld-opt="-L$PREFIX/lib" \
+      --add-module="$ROOT/nginx" >/dev/null
+    make -j"$JOBS" >/dev/null
+    make install >/dev/null
+  )
+  log "nginx installed at $DEPS/nginx-bench/sbin/nginx"
+}
+
 case "${1:-all}" in
   all)    build_hiredis; build_valkey; build_nginx ;;
   asan)   build_hiredis; build_valkey_asan; SANITIZE=1 build_nginx ;;
   deps)   build_hiredis; build_valkey ;;
   nginx)  build_nginx ;;
+  bench)  build_hiredis; build_valkey; build_nginx_bench ;;
   clean)  rm -rf "$DEPS" ;;
-  *)      echo "usage: $0 [all|deps|nginx|asan|clean]" >&2; exit 1 ;;
+  *)      echo "usage: $0 [all|deps|nginx|asan|bench|clean]" >&2; exit 1 ;;
 esac

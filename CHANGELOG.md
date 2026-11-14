@@ -35,6 +35,9 @@ repository. History from both is preserved.
   using nginx's asynchronous resolver, and records a `block` (or `mark`)
   decision `BY bot_verifier` for those that fail. `repsheet_bot_verifier*`
   directives, `$repsheet_bot_verifier_*` variables and metrics.
+- `repsheet-bench` (`make bench`): measures the CPU Repsheet adds per request
+  against nginx without it, across store sizes, networks, actors, sync churn
+  and the bot verifier.
 - `repsheet-admin`, a web UI (Rust) to look up actors, list, add, change and
   clear decisions, and browse the change log. Replaces the archived
   `repsheet/visualizer`.

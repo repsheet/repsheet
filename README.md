@@ -49,6 +49,7 @@ The repository contains three components:
 | `admin/`  | `repsheet-admin`, a web UI for viewing and managing decisions (Rust). |
 | `common/` | Actor parsing and canonicalization shared by all three. |
 | `detectors/` | How detectors work; the passive detector contract. |
+| `bench/`  | `repsheet-bench`, which measures Repsheet's per-request overhead (Rust). |
 
 The nginx module never queries Redis while handling a request. One worker
 keeps the shared memory store in sync:
@@ -385,6 +386,60 @@ refuses changes.
 
 `/healthz` returns 200 once the UI is in sync with Valkey/Redis.
 
+## Performance
+
+`bench/` holds `repsheet-bench`, which measures what Repsheet adds to the cost
+of serving a request. Each scenario runs two nginx servers with identical
+configuration except that one has no Repsheet at all, sends both the same
+requests in alternating runs, and compares the nginx worker's **CPU time per
+request** (from `/proc/<pid>/schedstat`), along with throughput and client
+latency. An "aa" scenario runs the baseline against itself to show the noise
+floor.
+
+```sh
+make bench                                   # full suite (~13 min), results in bench/results/
+make bench BENCH_ARGS="-s store-1m -s actors"
+make bench BENCH_ARGS="--compare bench/results/<earlier>.json"
+make bench-quick                             # every scenario, briefly: checks it all works
+bench/target/release/repsheet-bench list     # what each scenario does
+```
+
+It uses an optimized nginx (`script/bootstrap bench`: `-O2`, no debug
+logging) with one worker pinned to CPU 0 and the load generator on the other
+CPUs. Requests are 64 keep-alive connections fetching a 6-byte file, which
+makes Repsheet's share as large as it can be; real requests cost more, so the
+same microseconds are a smaller fraction.
+
+Results on a 16-CPU Linux machine (nginx 1.30.6, Valkey 9.1.3):
+
+| Scenario | nginx alone | with Repsheet | added per request |
+|----------|------------:|--------------:|------------------:|
+| empty store | 3.50 µs | 3.54 µs | +0.04 µs (noise) |
+| 10k decisions | 3.55 µs | 3.86 µs | +0.32 µs |
+| 100k decisions | 3.50 µs | 3.93 µs | +0.43 µs |
+| 1M decisions | 3.52 µs | 4.03 µs | +0.51 µs |
+| 100k decisions + 1,000 changes/s syncing | 3.52 µs | 3.93 µs | +0.40 µs |
+| cookie and header actors, 100k decisions | 3.58 µs | 4.35 µs | +0.78 µs |
+| decisions at every IPv4 and IPv6 prefix length | 3.61 µs | 15.31 µs | +11.69 µs |
+| bot verifier, browser traffic | 3.59 µs | 5.70 µs | +2.10 µs |
+| bot verifier, Googlebot from its ranges | 3.43 µs | 4.05 µs | +0.61 µs |
+
+What this means:
+
+* **Lookups are cheap and grow slowly**: about half a microsecond at a
+  million decisions, and sync churn adds nothing measurable.
+* **Network decisions cost per prefix length in use** (about 85 ns for each
+  length the client's family has decisions at). Most deployments use a
+  handful of lengths; the worst case above uses all 138.
+* **The bot verifier's User-Agent check runs on every request.** Enable
+  `pcre_jit on;` (main context): it cut this cost by about 0.65 µs per request
+  in our measurements.
+* **Sync of very large stores**: `REPSHEET.SNAPSHOT` of 1M decisions takes
+  about a second in Valkey, longer than the default `repsheet_redis_timeout`
+  (1s), so nginx keeps retrying and never loads them. Raise
+  `repsheet_redis_timeout` above the snapshot time if you hold that many
+  decisions (the `store-1m` scenario uses 10s).
+
 ## Building
 
 Requirements: a C compiler, make, hiredis ≥ 1.0 (for nginx), and nginx
@@ -396,6 +451,7 @@ make bootstrap   # fetch + build pinned hiredis, Valkey and nginx into .deps/
 make             # build redis/repsheet.so, nginx with the module, and repsheet-admin
 make test        # pytest suite against real Valkey, nginx and the admin UI
 make sanitize    # the same suite with ASan/UBSan on the module, Valkey and nginx
+make bench       # performance benchmarks (see "Performance")
 
 make run-valkey  # Valkey with the module on 127.0.0.1:6379 (VALKEY_PORT=...)
 make run-admin   # the admin UI on 127.0.0.1:8090 (REDIS=..., ADMIN_ARGS=...)

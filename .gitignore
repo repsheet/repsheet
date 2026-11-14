@@ -7,3 +7,5 @@ __pycache__/
 dump.rdb
 redis/.flavor
 admin/target/
+bench/target/
+bench/results/

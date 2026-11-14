@@ -1,4 +1,4 @@
-.PHONY: all bootstrap module nginx admin test test-module test-nginx test-admin sanitize clean distclean format \
+.PHONY: all bootstrap module nginx admin bench bench-quick test test-module test-nginx test-admin sanitize clean distclean format \
         run-valkey run-admin docker-build docker-up docker-down docker-logs
 
 all: module nginx admin
@@ -37,6 +37,31 @@ sanitize:
 	# Restore the normal nginx build even when the tests fail.
 	cd tests && SANITIZE=1 uv run pytest; status=$$?; \
 	  cd .. && script/bootstrap nginx >/dev/null && exit $$status
+
+# --------------------------------------------------------------------------
+# Benchmarks: what Repsheet adds to the CPU cost of a request, scenario by
+# scenario, against nginx without Repsheet. Needs a quiet machine.
+#   make bench                           full suite, results in bench/results/
+#   make bench BENCH_ARGS="-s store-1m"  one scenario (see: repsheet-bench list)
+#   make bench BENCH_ARGS="--compare bench/results/<earlier>.json"
+# --------------------------------------------------------------------------
+
+BENCH_ARGS ?=
+BENCH = bench/target/release/repsheet-bench
+
+$(BENCH): $(wildcard bench/src/*.rs) bench/Cargo.toml
+	cargo build --release --manifest-path bench/Cargo.toml
+
+# Rebuilt whenever the module's sources change.
+.deps/nginx-bench/sbin/nginx: $(wildcard nginx/config nginx/src/*.[ch] nginx/src/*/*.[ch] common/*.[ch])
+	script/bootstrap bench
+
+bench: module .deps/nginx-bench/sbin/nginx $(BENCH)
+	$(BENCH) run --pin --json bench/results/$$(date -u +%Y%m%dT%H%M%SZ).json $(BENCH_ARGS)
+
+# A fast pass over every scenario (short runs, one repeat): checks it all works.
+bench-quick: module .deps/nginx-bench/sbin/nginx $(BENCH)
+	$(BENCH) run --duration 2 --warmup 1 --repeat 1 $(BENCH_ARGS)
 
 # --------------------------------------------------------------------------
 # Running locally. Start Valkey in one terminal and the admin UI in another:
@@ -90,6 +115,7 @@ format:
 clean:
 	$(MAKE) -C redis clean
 	cargo clean --manifest-path admin/Cargo.toml
+	cargo clean --manifest-path bench/Cargo.toml
 
 distclean: clean
 	script/bootstrap clean
