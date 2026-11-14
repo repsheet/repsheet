@@ -74,6 +74,8 @@ docker-up:
 	@echo "nginx:    http://localhost:8080"
 	@echo "metrics:  http://localhost:8080/metrics"
 	@echo "admin UI: http://localhost:8090"
+	@echo "grafana:  http://localhost:3000  (Repsheet dashboard; admin/admin to edit)"
+	@echo "prometheus: http://localhost:9090"
 
 docker-down:
 	$(COMPOSE) down

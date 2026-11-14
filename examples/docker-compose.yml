@@ -1,7 +1,9 @@
 # docker compose -f examples/docker-compose.yml up --build
 #
 # nginx on http://localhost:8080, metrics on http://localhost:8080/metrics,
-# admin UI on http://localhost:8090 (no login; published on loopback only).
+# admin UI on http://localhost:8090 (no login; published on loopback only),
+# Grafana on http://localhost:3000 (Repsheet dashboard; admin/admin to edit),
+# Prometheus on http://localhost:9090.
 # Manage decisions with:
 #   docker compose -f examples/docker-compose.yml exec valkey valkey-cli REPSHEET.BLOCK 172.16.0.0/12 REASON demo
 name: repsheet
@@ -35,3 +37,39 @@ services:
       - "127.0.0.1:8090:8090"
     depends_on:
       - valkey
+
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      - nginx
+
+  grafana:
+    image: grafana/grafana:13.3.1
+    environment:
+      # Local demo: anyone on this machine can view; sign in as admin/admin to edit.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/repsheet.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus:
+  grafana:

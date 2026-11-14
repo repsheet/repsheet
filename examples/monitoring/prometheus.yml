@@ -1,0 +1,12 @@
+# Scrapes the nginx module's metrics (location = /metrics in examples/nginx.conf).
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: repsheet
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["nginx:80"]
+        labels:
+          instance: nginx

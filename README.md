@@ -84,8 +84,16 @@ curl -i localhost:8080/                         # 403
 curl -s localhost:8080/metrics
 ```
 
-The admin UI is on http://localhost:8090. `make docker-logs` follows the logs
-and `make docker-down` stops everything.
+The admin UI is on http://localhost:8090. Grafana on http://localhost:3000
+shows the Repsheet dashboard (decisions, requests by decision, sync health,
+zone usage, and the bot verifier's claims, answer sources and lookup
+latency), fed by Prometheus on http://localhost:9090 scraping `/metrics`
+every 5 seconds. `make docker-logs` follows the logs and `make docker-down`
+stops everything.
+
+The Prometheus scrape config and the dashboard are in `examples/monitoring/`
+(`grafana/dashboards/repsheet.json` can be imported into any Grafana with a
+Prometheus data source).
 
 `examples/` also shows how to pass marks to an upstream and how to rate limit
 marked actors.
