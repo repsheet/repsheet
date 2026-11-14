@@ -1,0 +1,4 @@
+.deps
+.git
+ranges
+tests/.venv

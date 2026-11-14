@@ -1,4 +1,7 @@
-build
-vendor
-t/servroot
+.deps/
+ranges/
+tests/.venv/
+__pycache__/
+.pytest_cache/
 dump.rdb
+compile_flags.txt

@@ -1,245 +1,246 @@
-# NGINX Search Index Bot Verification Module [![Build Status](https://secure.travis-ci.org/abedra/ngx_bot_verifier.png)](http://travis-ci.org/abedra/ngx_bot_verifier?branch=master) ![Coverity Build Status](https://scan.coverity.com/projects/16736/badge.svg)
+# ngx_bot_verifier
 
-## Table of Contents
+An nginx module that checks whether clients claiming to be search engine
+crawlers really are.
 
-* [Status](#status)
-* [Version](#version)
-* [Synopsis](#synopsis)
-* [Description](#description)
-* [Directives](#directives)
-  * [bot_verifier](#bot_verifier)
-  * [bot_verifier_redis_host](#bot_verifier_redis_host)
-  * [bot_verifier_redis_port](#bot_verifier_redis_port)
-  * [bot_verifier_redis_connection_timeout](#bot_verifier_redis_connection_timeout)
-  * [bot_verifier_redis_read_timeout](#bot_verifier_redis_read_timeout)
-  * [bot_verifier_redis_expiry](#bot_verifier_redis_expiry)
-  * [bot_verifier_repsheet_enabled](#bot_verifier_repsheet_enabled)
-* [Installation](#installation)
-* [Verifying Functionality](#verifying-functionality)
-* [Developer Setup](#developer-setup)
-* [Running the Test Suite](#running-the-test-suite)
+Sites relax their defenses for Googlebot, Bingbot and friends: rate limits,
+challenges and bot rules should not get in the way of indexing. The
+`User-Agent` header is not proof, though, and "Googlebot" is one of the most
+common disguises for scrapers and attackers. The search engines document how
+to tell the real ones apart, and this module does it for every request that
+makes the claim:
 
-## Status
+1. If the provider publishes its crawlers' IP ranges and the client is in
+   them, it is verified.
+2. Otherwise a **reverse DNS** lookup of the client address must return a
+   name under one of the provider's domains (`crawl-66-249-66-1.googlebot.com`),
+   and a **forward lookup** of that name must return the client address.
 
-[BETA] This module has been tested on a handful of production websites. It has not yet been evaluated at scale. If you would like to consider testing this at scale I would be happy to assist and allocate time to correct any issues.
+Requests that claim to be a crawler and fail are blocked (403 by default).
+Everyone else is untouched: requests that do not claim to be a crawler are
+never looked up.
 
-[Back to TOC](#table-of-contents)
+```
+$ curl -A "Mozilla/5.0 (compatible; Googlebot/2.1)" -i https://example.com/
+HTTP/1.1 403 Forbidden
 
-## Version
+error.log: bot_verifier: 203.0.113.9 failed verification, claimed google: no reverse DNS
+```
 
-This document describes version [0.0.5](https://github.com/abedra/ngx_bot_verifier/tags) released on 9/12/2018.
+Lookups use nginx's own asynchronous resolver, so a slow DNS server never
+stalls other requests. Results are cached in shared memory and, optionally,
+in Valkey/Redis so a fleet of nginx servers verifies each address once.
 
-[Back to TOC](#table-of-contents)
+## Quick start (Docker)
 
-## Synopsis
+```sh
+make docker-up        # nginx with the module on :8081, plus Valkey
+curl -A "Mozilla/5.0 (compatible; Googlebot/2.1)" -i localhost:8081/   # 403
+curl -s localhost:8081/metrics
+make docker-down
+```
+
+## Configuration
 
 ```nginx
-location / {
+load_module modules/ngx_http_bot_verifier_module.so;   # if built as a dynamic module
+
+http {
+    resolver 1.1.1.1 8.8.8.8 valid=300s;    # required: used for the lookups
+    resolver_timeout 5s;
+
     bot_verifier on;
-    bot_verifier_redis_host localhost;
-    bot_verifier_redis_port 6379;
-    bot_verifier_redis_connection_timeout 10;
-    bot_verifier_redis_read_timeout 10;
-    bot_verifier_redis_expiry 3600;
-	bot_verifier_repsheet_enabled on;
+
+    # Optional: published ranges verify most Google, Bing, Apple and
+    # DuckDuckGo crawlers without DNS (see "Published ranges" below).
+    bot_verifier_ranges google /etc/nginx/bot_ranges/google-common-crawlers.json;
+    bot_verifier_ranges bing   /etc/nginx/bot_ranges/bingbot.json;
+
+    # Optional: share results between servers, report fakes to Repsheet.
+    bot_verifier_redis 10.0.0.5:6379;
+    bot_verifier_repsheet mark 1h;
+
+    # Behind a load balancer, let realip decide the client address.
+    set_real_ip_from 10.0.0.0/8;
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
+
+    server {
+        location / {
+            proxy_set_header X-Verified-Crawler $bot_verifier_provider;
+            proxy_pass http://app;
+        }
+        location = /metrics {
+            bot_verifier off;
+            bot_verifier_metrics;
+            allow 10.0.0.0/8;
+            deny all;
+        }
+    }
 }
 ```
 
-[Back to TOC](#table-of-contents)
+| Directive | Context | Default | |
+|-----------|---------|---------|---|
+| `bot_verifier on \| off \| monitor` | http, server, location | `off` | `monitor` verifies and logs, but never blocks. |
+| `bot_verifier_timeout <time>` | http, server, location | `5s` | Timeout for each DNS query. |
+| `bot_verifier_block_status <code>` | http, server, location | `403` | 400–599. |
+| `bot_verifier_ttl <verified> [<failed> [<unknown>]]` | http | `24h 1h 1m` | How long results are cached. |
+| `bot_verifier_zone_size <size>` | http | `16m` | Shared memory for cached results (128 bytes each). When full, the least recently used results are dropped. |
+| `bot_verifier_provider <name> { ... }` | http | | Add a provider, or replace a built-in one. See below. |
+| `bot_verifier_ranges <provider> <file>...` | http | | Published IP ranges for a provider. |
+| `bot_verifier_redis <address>` | http | none | `host:port`, `[v6]:port` or `unix:/path`. |
+| `bot_verifier_redis_auth [user] <password>` | http | none | |
+| `bot_verifier_redis_timeout <time>` | http | `100ms` | How long a request waits for the Redis cache before going to DNS. |
+| `bot_verifier_repsheet off \| mark [ttl] \| block [ttl]` | http | `off` | Report failed verifications to [Repsheet](https://github.com/repsheet/repsheet). Needs `bot_verifier_redis`. TTL defaults to `1h`. |
+| `bot_verifier_metrics` | location | | Prometheus metrics. |
 
-## Description
+nginx refuses to start if `bot_verifier` is on where no `resolver` is
+configured.
 
-This is an NGINX module designed to validate actors claiming to be search engine indexers. It is right to disable security mechanisms for valid search engine bots to ensure your controls do not interfere with page rankings on any of the search providers. The issue is that the [User Agent](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/User-Agent) header cannot be trusted. In order to ensure you are allowing only valid search engine indexers, you must validate according to their published standards. This module performs that validation and caches the results to ensure you do not pay validation penalties on every request.
+Variables: `$bot_verifier_result` (`verified`, `failed`, `unknown`, or empty
+when the request made no claim) and `$bot_verifier_provider` (the claimed
+provider). Use them in logs, `map`s, `limit_req` keys, or to tell the
+application which crawler it is serving.
 
-[Back to TOC](#table-of-contents)
+### Results
 
-Directives
-==========
+| Result | When | Request |
+|--------|------|---------|
+| `verified` | In the published ranges, or reverse and forward DNS agree | allowed |
+| `failed` | No reverse DNS, a name outside the provider's domains, a name that does not resolve back, or outside the ranges of a ranges-only provider | blocked |
+| `unknown` | DNS error or timeout, or no way to check (a ranges-only provider without ranges) | allowed |
 
-The following directives are used only for module configuration.
+`unknown` fails open on purpose: a DNS outage should not de-index your site.
+It is cached briefly (`1m`), so the next request tries again.
 
-[Back to TOC](#table-of-contents)
+A cached result only applies to the provider it was found for. An address
+verified as Googlebot that later claims to be Bingbot fails; an address that
+failed as Googlebot is not blocked when it makes no claim, so one fake
+User-Agent behind a shared NAT does not block everyone else behind it.
 
-bot_verifier
-------------
+## Providers
 
-**syntax:** *bot_verifier* \[on|off\]
+| Name | User-Agent (case-insensitive regex) | Domains |
+|------|-------------------------------------|---------|
+| `google` | `googlebot\|google-inspectiontool\|googleother\|storebot-google\|adsbot-google\|mediapartners-google\|feedfetcher-google\|apis-google\|google-site-verification` | googlebot.com, google.com, googleusercontent.com |
+| `bing` | `bingbot\|bingpreview\|msnbot\|adidxbot` | search.msn.com |
+| `apple` | `applebot` | applebot.apple.com |
+| `yandex` | `yandex\w*bot\|yandex(images\|video\|media\|metrika\|webmaster\|favicons\|direct)\b` | yandex.ru, yandex.net, yandex.com |
+| `baidu` | `baiduspider` | baidu.com, baidu.jp |
+| `yahoo` | `yahoo! slurp` | crawl.yahoo.net |
+| `duckduckgo` | `duckduckbot` | none: verified by its published ranges only |
 
-**default:** *off*
+Domains come from each provider's verification guide (November 2026). For
+Baidu and Yahoo the providers' own pages could not be checked; their domains
+come from consistent secondary sources. A name matches a domain if it equals
+it or ends in `.` plus the domain, so `evilgooglebot.com` and
+`googlebot.com.evil.net` do not match `googlebot.com`.
 
-**context:** *location*
-
-**phase:** *access*
-
-Enables or disables the module. The module will not act unless it is set to *on*.
-
-[Back to TOC](#table-of-contents)
-
-bot_verifier_redis_host
------------------------
-
-**syntax:** *bot_verifier_redis_host* &lt;string&gt;
-
-**default:** *localhost*
-
-**context:** *location*
-
-**phase:** *access*
-
-Sets the Redis host. This setting is used to connect to the Redis database used for caching lookup results.
-
-[Back to TOC](#table-of-contents)
-
-bot_verifier_redis_port
------------------------
-
-**syntax:** *bot_verifier_redis_port* &lt;int&gt;
-
-**default:** *6379*
-
-**context:** *location*
-
-**phase:** *access*
-
-Sets the Redis port. This setting is used to connect to the Redis database used for caching lookup results.
-
-[Back to TOC](#table-of-contents)
-
-bot_verifier_redis_connection_timeout
--------------------------------------
-
-**syntax:** *bot_verifier_redis_connection_timeout* &lt;int&gt;
-
-**default:** *10*
-
-**context:** *location*
-
-**phase:** *access*
-
-Sets the timeout when connecting to Redis. This setting is used to connect to the Redis database used for caching lookup results.
-
-[Back to TOC](#table-of-contents)
-
-bot_verifier_redis_read_timeout
--------------------------------------
-
-**syntax:** *bot_verifier_redis_read_timeout* &lt;int&gt;
-
-**default:** *10*
-
-**context:** *location*
-
-**phase:** *access*
-
-Sets the timeout when querying Redis. This setting is used to connect to the Redis database used for caching lookup results.
-
-[Back to TOC](#table-of-contents)
-
-bot_verifier_redis_expiry
--------------------------
-
-**syntax:** *bot_verifier_redis_expiry* &lt;seconds&gt;
-
-**default:** *3600*
-
-**context:** *location*
-
-**phase:** *access*
-
-Sets the timeout when querying Redis. This setting is used to connect to the Redis database used for caching lookup results.
-
-[Back to TOC](#table-of-contents)
-
-bot_verifier_repsheet_enabled
--------------------------
-
-**syntax:** *bot_verifier_repsheet_enabled* \[on|off\]
-
-**default:** *off*
-
-**context:** *location*
-
-**phase:** *access*
-
-Enables blacklisting of failed actors in Repsheet. Assumes Repsheet cache lives on already configured redis server.
-
-[Back to TOC](#table-of-contents)
-
-## Installation
-
-You can add this module to the static build of NGINX or as a dynamic module. To add as a static module add the following line to the `configure` command when compiling NGINX.
-
-```
-./configure --add-module=<path/to/ngx_bot_verifier>
-```
-
-If you wish to add this module as a dynamic module, change the argument to `configure` to the following:
-
-```
-./configure --add-dynamic-module=<path/to/ngx_bot_verifier>
-```
-
-You will then have to run `make modules` after you run `make` to ensure the module gets compiled and installed. You will also need to add a line to you `nginx.conf` telling it where to find the module. This must be added in the `MAIN CONF` section.
+Add your own, or replace a built-in one by reusing its name:
 
 ```nginx
-load_module modules/ngx_http_bot_verifier_module.so;
+bot_verifier_provider examplebot {
+    user_agent "ExampleBot/\d";
+    domain crawler.example.org;
+    ranges /etc/nginx/bot_ranges/examplebot.txt;   # optional
+}
 ```
 
-This will ensure the module is loaded and available for use.
+### Published ranges
 
-[Back to TOC](#table-of-contents)
+Google, Bing, Apple and DuckDuckGo publish their crawlers' address ranges.
+Checking them needs no DNS at all, and for DuckDuckBot it is the only way.
+`script/fetch-ranges [dir]` downloads them:
 
-## Verifying Functionality
-
-In order to ensure the module is working properly you will need to issue a query that will trigger failure and success cases. To trigger a failure case issue the following request:
-
-```
-curl -A "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html" localhost:8888
+```sh
+script/fetch-ranges /etc/nginx/bot_ranges && nginx -s reload
 ```
 
-This will issue a query that identifies itself as a Google bot. The reverse and forward lookup routine will fail and you will get a `403` response. To ensure the verification works when a bot is identified issue the following request:
+Run it from cron to keep the lists current. Files are read when nginx starts
+or reloads. Both the providers' JSON (`ipv4Prefix`/`ipv6Prefix`) and plain
+text (one address or network per line, `#` comments) are accepted. An address
+outside a provider's ranges still gets the DNS check if the provider has
+domains, because the lists can lag behind.
+
+## Redis and Repsheet
+
+With `bot_verifier_redis`, results are also stored as
+`{bot_verifier}:<address>` = `verified:google` (with the same TTLs) and read
+by every server before it does any DNS. A request waits at most
+`bot_verifier_redis_timeout` for that read. If Redis is down or slow the
+module carries on with shared memory and DNS, and reconnects in the
+background. `unknown` results are not shared.
+
+With `bot_verifier_repsheet mark` (or `block`), every address that fails a
+fresh verification is reported to Repsheet:
 
 ```
-curl -H "X-Forwarded-For: 66.249.66.1" -A "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html" localhost:8888
+REPSHEET.MARK ip:203.0.113.9 REASON "bot_verifier: claimed google: no reverse DNS" TTL 3600 BY bot_verifier
 ```
 
-This will spoof the `X-Forwarded-For` header and pretend to be from a valid google address. The request should succeed and return a normal response.
+Repsheet then acts on it across all of your nginx servers, for every request
+from that address (marked actors can be rate limited, blocked ones are
+rejected). That needs the Repsheet module loaded in the same Valkey/Redis;
+if it is missing the error is logged once per worker.
 
-[Back to TOC](#table-of-contents)
+## Metrics
 
-## Developer Setup
+| Metric | |
+|--------|---|
+| `bot_verifier_requests_total{result}` | Requests that claimed to be a crawler. |
+| `bot_verifier_blocked_total` | Requests rejected (excludes monitor mode). |
+| `bot_verifier_answers_total{source}` | Where results came from: `zone`, `ranges`, `redis`, `dns`, `none` (too many lookups in flight). |
+| `bot_verifier_dns_queries_total`, `bot_verifier_dns_errors_total` | DNS activity. |
+| `bot_verifier_redis_errors_total`, `bot_verifier_repsheet_reports_total` | Redis activity. |
+| `bot_verifier_cache_entries`, `bot_verifier_cache_evictions_total` | The shared-memory cache. |
+| `bot_verifier_zone_size_bytes`, `bot_verifier_zone_free_bytes` | Shared memory. |
 
-This module contains a full self-contained development environment. This is done to ensure work on the module does not interfere with any other NGINX installations. To setup the environment run the `script/bootstrap` command. This will create the following directories:
+## Things to know
 
+* **Client address.** The module uses the connection address after the
+  realip module. It never reads `X-Forwarded-For` itself; any client can set
+  that. Configure `set_real_ip_from` for proxies you trust.
+* **Phase.** It runs at the end of the preaccess phase, so a block cannot be
+  overridden by `satisfy any`, and like `deny` it does not see responses
+  produced earlier by `return`.
+* **Resolver.** Lookups use nginx's `resolver`, which caches answers for
+  their DNS TTL (or `valid=`). Point it at a resolver you trust.
+* **Load.** At most 1024 lookups run at once per worker; beyond that requests
+  get `unknown`. Concurrent requests for the same address share one lookup.
+
+## Building
+
+The module needs hiredis ≥ 1.0 and nginx sources. Build it statically or as a
+dynamic module:
+
+```sh
+./configure --add-module=/path/to/ngx_bot_verifier ...          # static
+./configure --add-dynamic-module=/path/to/ngx_bot_verifier ...  # dynamic
 ```
-vendor - The NGINX installation will live here  
-build - The NGINX install will live here  
+
+To build against a packaged nginx, configure the same nginx version with
+`--with-compat` and run `make modules`; the `Dockerfile` does exactly this.
+
+For development (the tests need [uv](https://docs.astral.sh/uv/)):
+
+```sh
+make bootstrap   # fetch + build pinned hiredis, Valkey, the Repsheet module and nginx into .deps/
+make test        # pytest against real nginx, a fake DNS server and Valkey
+make sanitize    # the same with ASan/UBSan
+make nginx       # rebuild nginx after changing the module
 ```
 
-The `nginx.conf` file in the root of this repository will be symlinked to `build/nginx/conf/nginx.conf` to make configuration changes easier. You can start NGINX using the following command:
+`script/bootstrap` takes `NGINX_VERSION`, `VALKEY_VERSION`,
+`HIREDIS_VERSION`, `REPSHEET_REF`, `DYNAMIC=1` and `SANITIZE=1`. CI covers
+nginx 1.30 (stable) and 1.31 (mainline), static and dynamic builds, and a
+sanitizer run.
 
-```
-build/nginx/sbin/nginx
-```
+## History
 
-Log files are available at `build/nginx/logs`. You can stop the server by running
+Written in 2017 as part of [Repsheet](https://github.com/repsheet/repsheet).
+Version 1.0 is a rewrite; see [CHANGELOG.md](CHANGELOG.md) for what changed.
 
-```
-build/nginx/sbin/nginx -s stop
-```
+## License
 
-If you are making changes to the module, you can recompile them by running `make compile`. Remember to restart the NGINX after this completes successfully.
-
-[Back to TOC](#table-of-contents)
-
-## Running the Test Suite
-
-This repository comes with a test suite that uses the `Test::Nginx` library. To run the test you will need to install the following libraries:
-
-```
-cpanm -S install Test::Nginx Test::Nginx::Socket
-```
-
-Once the libraries are installed just run `make` and the suite will run. If you are submitting a change to this module please make sure to run the test suite before you do. Any changes that break the test suite will not be accepted.
-
-[Back to TOC](#table-of-contents)
+Apache 2.0.

@@ -1,0 +1,3 @@
+# nginx style is not expressible in clang-format; keep the code as written.
+DisableFormat: true
+SortIncludes: false

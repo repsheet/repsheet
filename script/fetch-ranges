@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+#
+# Download the IP ranges search engines publish for their crawlers.
+#
+#   script/fetch-ranges [dir]        default dir: ./ranges
+#
+# Then point nginx at them, for example:
+#
+#   bot_verifier_ranges google     /etc/nginx/bot_ranges/google-common-crawlers.json
+#                                  /etc/nginx/bot_ranges/google-special-crawlers.json
+#                                  /etc/nginx/bot_ranges/google-user-triggered-fetchers.json
+#                                  /etc/nginx/bot_ranges/google-user-triggered-fetchers-google.json;
+#   bot_verifier_ranges bing       /etc/nginx/bot_ranges/bingbot.json;
+#   bot_verifier_ranges apple      /etc/nginx/bot_ranges/applebot.json;
+#   bot_verifier_ranges duckduckgo /etc/nginx/bot_ranges/duckduckbot.json;
+#
+# and reload nginx. Run it from cron to keep the lists current. A file is only
+# replaced when the download succeeds and contains at least one prefix.
+#
+set -euo pipefail
+
+DIR="${1:-ranges}"
+mkdir -p "$DIR"
+
+declare -A SOURCES=(
+  [google-common-crawlers.json]="https://developers.google.com/static/crawling/ipranges/common-crawlers.json"
+  [google-special-crawlers.json]="https://developers.google.com/static/crawling/ipranges/special-crawlers.json"
+  [google-user-triggered-fetchers.json]="https://developers.google.com/static/crawling/ipranges/user-triggered-fetchers.json"
+  [google-user-triggered-fetchers-google.json]="https://developers.google.com/static/crawling/ipranges/user-triggered-fetchers-google.json"
+  [bingbot.json]="https://www.bing.com/toolbox/bingbot.json"
+  [applebot.json]="https://search.developer.apple.com/applebot.json"
+  [duckduckbot.json]="https://duckduckgo.com/duckduckbot.json"
+)
+
+status=0
+for name in "${!SOURCES[@]}"; do
+  url="${SOURCES[$name]}"
+  tmp="$(mktemp "$DIR/.$name.XXXXXX")"
+  if curl -fsSL --max-time 30 "$url" -o "$tmp" && grep -q 'Prefix"' "$tmp"; then
+    mv "$tmp" "$DIR/$name"
+    printf '%-45s %s prefixes\n' "$name" "$(grep -o 'Prefix"' "$DIR/$name" | wc -l | tr -d ' ')"
+  else
+    rm -f "$tmp"
+    printf '%-45s FAILED (%s)\n' "$name" "$url" >&2
+    status=1
+  fi
+done
+exit "$status"

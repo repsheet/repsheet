@@ -1,89 +1,121 @@
-#!/bin/bash
+#!/usr/bin/env bash
+#
+# Download and build the pinned development dependencies into .deps/
+#
+#   script/bootstrap            hiredis, Valkey, the Repsheet module, nginx
+#   script/bootstrap nginx      rebuild nginx (with this module) only
+#   script/bootstrap asan       sanitizer builds of Valkey, the Repsheet module and nginx
+#   script/bootstrap clean      remove .deps/
+#
+# Environment overrides:
+#   NGINX_VERSION, VALKEY_VERSION, HIREDIS_VERSION, REPSHEET_REF
+#   SANITIZE=1      build nginx with ASan/UBSan
+#   DYNAMIC=1       build this module as a dynamic module
+#
+# Valkey and the Repsheet module are only needed by the tests (Redis cache and
+# Repsheet reporting); the module itself only needs hiredis and nginx.
+#
+set -euo pipefail
 
-set -o nounset
-set -o errexit
+NGINX_VERSION="${NGINX_VERSION:-1.30.6}"
+VALKEY_VERSION="${VALKEY_VERSION:-9.1.3}"
+HIREDIS_VERSION="${HIREDIS_VERSION:-1.5.0}"
+REPSHEET_REF="${REPSHEET_REF:-c0a619000317444ffde98229ffb93640945ff976}"
 
-NGINX_VERSION=1.16.0
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+DEPS="$ROOT/.deps"
+SRC="$DEPS/src"
+PREFIX="$DEPS/prefix"
+JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
-DIR=$(pwd)
-BUILDDIR=$DIR/build
-NGINX_DIR=nginx
-DEBUG_FLAGS="-g -O0 -Wall -Werror -static-libasan -fsanitize=address -fsanitize=leak -fsanitize=undefined -fsanitize=unreachable -fsanitize=vla-bound -fsanitize=null"
+log() { printf '==> %s\n' "$*"; }
 
-setup_local_directories () {
-    if [ ! -d $BUILDDIR ]; then
-        mkdir $BUILDDIR > /dev/null 2>&1
-        mkdir $BUILDDIR/$NGINX_DIR > /dev/null 2>&1
-    fi
-
-    if [ ! -d "vendor" ]; then
-        mkdir vendor > /dev/null 2>&1
-    fi
+fetch() { # url dest-dir
+  local url="$1" dest="$2"
+  if [[ -d "$dest" ]]; then return; fi
+  log "fetching $url"
+  mkdir -p "$SRC"
+  curl -fsSL "$url" | tar xz -C "$SRC"
 }
 
-clean () {
-    rm -rf build vendor
+build_hiredis() {
+  if [[ -f "$PREFIX/lib/libhiredis.a" ]]; then return; fi
+  fetch "https://github.com/redis/hiredis/archive/refs/tags/v${HIREDIS_VERSION}.tar.gz" \
+    "$SRC/hiredis-${HIREDIS_VERSION}"
+  log "building hiredis ${HIREDIS_VERSION}"
+  make -C "$SRC/hiredis-${HIREDIS_VERSION}" -j"$JOBS" \
+    PREFIX="$PREFIX" CFLAGS="-fPIC -O2 -g" USE_SSL=0 install >/dev/null
+  # Link statically so nginx does not need hiredis at runtime in development.
+  rm -f "$PREFIX"/lib/libhiredis*.so*
 }
 
-clone_echo_module () {
-    pushd vendor > /dev/null 2>&1
-    git clone "https://github.com/openresty/echo-nginx-module" > /dev/null 2>&1
-    popd
+build_valkey() {
+  if [[ -x "$PREFIX/bin/valkey-server" ]]; then return; fi
+  fetch "https://github.com/valkey-io/valkey/archive/refs/tags/${VALKEY_VERSION}.tar.gz" \
+    "$SRC/valkey-${VALKEY_VERSION}"
+  log "building valkey ${VALKEY_VERSION} (takes a minute)"
+  make -C "$SRC/valkey-${VALKEY_VERSION}" -j"$JOBS" BUILD_TLS=no >/dev/null
+  make -C "$SRC/valkey-${VALKEY_VERSION}" PREFIX="$PREFIX" install >/dev/null
 }
 
-install_nginx () {
-    if [ ! -d "vendor/nginx-$NGINX_VERSION" ]; then
-        pushd vendor > /dev/null 2>&1
-        curl -s -L -O "http://nginx.org/download/nginx-$NGINX_VERSION.tar.gz"
-        tar xzf "nginx-$NGINX_VERSION.tar.gz"
-        pushd "nginx-$NGINX_VERSION" > /dev/null 2>&1
-	./configure                            \
-            --with-debug                       \
-            --prefix=$(pwd)/../../build/nginx  \
-            --conf-path=conf/nginx.conf        \
-            --error-log-path=logs/error.log    \
-            --http-log-path=logs/access.log    \
-	    --add-module=../echo-nginx-module  \
-            --add-module=../..
-        make
-        make install
-        popd > /dev/null 2>&1
-        popd > /dev/null 2>&1
-        ln -sf $(pwd)/nginx.conf $(pwd)/build/nginx/conf/nginx.conf
-    else
-        printf "NGINX $NGINX_VERSION is already installed\n"
-    fi
+# Valkey built with ASan, so a sanitized Repsheet module can be loaded.
+build_valkey_asan() {
+  if [[ -x "$DEPS/asan/bin/valkey-server" ]]; then return; fi
+  fetch "https://github.com/valkey-io/valkey/archive/refs/tags/${VALKEY_VERSION}.tar.gz" \
+    "$SRC/valkey-${VALKEY_VERSION}"
+  log "building valkey ${VALKEY_VERSION} with ASan"
+  rm -rf "$SRC/valkey-asan" && cp -r "$SRC/valkey-${VALKEY_VERSION}" "$SRC/valkey-asan"
+  make -C "$SRC/valkey-asan" distclean >/dev/null 2>&1 || true
+  make -C "$SRC/valkey-asan" -j"$JOBS" BUILD_TLS=no SANITIZER=address MALLOC=libc >/dev/null
+  make -C "$SRC/valkey-asan" PREFIX="$DEPS/asan" install >/dev/null
 }
 
-compile () {
-    pushd "vendor" > /dev/null 2>&1
-    pushd "nginx-$NGINX_VERSION" > /dev/null 2>&1
-    ./configure                             \
-        --with-debug                        \
-	--with-threads                      \
-	--with-ld-opt="-lasan -lubsan -ldl" \
-	--prefix=$(pwd)/../../build/nginx   \
-        --conf-path=conf/nginx.conf         \
-        --error-log-path=logs/error.log     \
-        --http-log-path=logs/access.log     \
-	--add-module=../echo-nginx-module   \
-        --add-module=../..
-    make
-    make install
-    popd
-    popd
+# The Repsheet Valkey/Redis module, for the bot_verifier_repsheet tests.
+build_repsheet() {
+  local flavor="${1:-}" out="$PREFIX/lib/repsheet.so" sanitize=0
+  if [[ "$flavor" == asan ]]; then out="$DEPS/asan/lib/repsheet.so"; sanitize=1; fi
+  if [[ -f "$out" ]]; then return; fi
+  fetch "https://github.com/repsheet/repsheet/archive/${REPSHEET_REF}.tar.gz" "$SRC/repsheet-${REPSHEET_REF}"
+  log "building the repsheet module (${REPSHEET_REF:0:7})"
+  make -C "$SRC/repsheet-${REPSHEET_REF}/redis" clean all SANITIZE="$sanitize" >/dev/null
+  mkdir -p "$(dirname "$out")"
+  cp "$SRC/repsheet-${REPSHEET_REF}/redis/repsheet.so" "$out"
 }
 
-if [[ "$#" -eq 1 ]]; then
-    if [[ "$1" == "clean" ]]; then
-        clean
-    elif [[ "$1" == "compile" ]]; then
-	compile
-    else
-        echo "The options are clean or compile"
-    fi
-else
-    setup_local_directories
-    clone_echo_module
-    install_nginx
-fi
+build_nginx() {
+  fetch "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" "$SRC/nginx-${NGINX_VERSION}"
+  log "building nginx ${NGINX_VERSION} with ngx_bot_verifier"
+
+  local cc_opt="-g -O1 -Wall -Wextra -Wno-unused-parameter -Werror -I$PREFIX/include"
+  local ld_opt="-L$PREFIX/lib"
+  if [[ "${SANITIZE:-0}" == 1 ]]; then
+    cc_opt="$cc_opt -fsanitize=address,undefined -fno-omit-frame-pointer"
+    ld_opt="$ld_opt -fsanitize=address,undefined"
+  fi
+
+  local add_module="--add-module=$ROOT"
+  [[ "${DYNAMIC:-0}" == 1 ]] && add_module="--add-dynamic-module=$ROOT"
+
+  (
+    cd "$SRC/nginx-${NGINX_VERSION}"
+    ./configure \
+      --prefix="$DEPS/nginx" \
+      --with-debug \
+      --with-http_realip_module \
+      --with-cc-opt="$cc_opt" \
+      --with-ld-opt="$ld_opt" \
+      "$add_module" >/dev/null
+    make -j"$JOBS" >/dev/null
+    make install >/dev/null
+  )
+  log "nginx installed at $DEPS/nginx/sbin/nginx"
+}
+
+case "${1:-all}" in
+  all)    build_hiredis; build_valkey; build_repsheet; build_nginx ;;
+  asan)   build_hiredis; build_valkey_asan; build_repsheet asan; SANITIZE=1 build_nginx ;;
+  deps)   build_hiredis; build_valkey; build_repsheet ;;
+  nginx)  build_nginx ;;
+  clean)  rm -rf "$DEPS" ;;
+  *)      echo "usage: $0 [all|deps|nginx|asan|clean]" >&2; exit 1 ;;
+esac

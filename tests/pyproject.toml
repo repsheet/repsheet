@@ -1,0 +1,14 @@
+[project]
+name = "ngx-bot-verifier-tests"
+version = "0"
+requires-python = ">=3.11"
+dependencies = [
+  "pytest>=8",
+  "redis>=5",
+  "requests>=2.32",
+  "dnslib>=0.9",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["."]

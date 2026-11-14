@@ -1,0 +1,11 @@
+# UBSan reports in third-party code that are known and harmless. Every other
+# report fails the test run, so keep entries as narrow as possible.
+
+# nginx debug logging copies zero bytes from a NULL pointer (%V of an empty
+# ngx_str_t) while parsing the request line. Entirely inside nginx core.
+nonnull-attribute:ngx_sprintf_str
+
+# nginx's resolver builds IPv4 addresses from A records with a signed left
+# shift (buf[i] << 24), which UBSan reports for any address >= 128.0.0.0.
+# Inside nginx core, triggered by any DNS answer.
+shift-base:ngx_resolver_process_a
