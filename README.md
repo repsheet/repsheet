@@ -171,7 +171,7 @@ http {
 | Directive | Context | Default | |
 |-----------|---------|---------|---|
 | `repsheet on \| off \| monitor` | http, server, location | `off` | `monitor` evaluates and logs `would block` but never blocks. |
-| `repsheet_redis <address>` | http | none | Required. `host:port`, `[v6]:port` or `unix:/path`. Hostnames are resolved by the worker when it connects; prefer addresses. |
+| `repsheet_redis <address>` | http | none | Required. `host:port`, `[v6]:port` or `unix:/path`. Hostnames are resolved by the worker when it connects; prefer addresses. [ngx_bot_verifier](https://github.com/repsheet/ngx_bot_verifier) reuses this and `repsheet_redis_auth` when loaded alongside. |
 | `repsheet_redis_auth [user] <password>` | http | none | `AUTH` on connect. |
 | `repsheet_redis_timeout <time>` | http | `1s` | Reconnect if Redis does not answer in time. |
 | `repsheet_sync_interval <time>` | http | `1s` | Polling interval. Changes usually arrive sooner through pubsub. |
