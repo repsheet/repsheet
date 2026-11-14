@@ -10,7 +10,9 @@
 # Environment overrides:
 #   NGINX_VERSION, VALKEY_VERSION, HIREDIS_VERSION, REPSHEET_REF
 #   SANITIZE=1      build nginx with ASan/UBSan
-#   DYNAMIC=1       build this module as a dynamic module
+#   DYNAMIC=1       build the modules as dynamic modules
+#   WITH_REPSHEET=0 build nginx without the Repsheet nginx module (default: with,
+#                   so the tests cover reusing repsheet_redis)
 #
 # Valkey and the Repsheet module are only needed by the tests (Redis cache and
 # Repsheet reporting); the module itself only needs hiredis and nginx.
@@ -20,7 +22,7 @@ set -euo pipefail
 NGINX_VERSION="${NGINX_VERSION:-1.30.6}"
 VALKEY_VERSION="${VALKEY_VERSION:-9.1.3}"
 HIREDIS_VERSION="${HIREDIS_VERSION:-1.5.0}"
-REPSHEET_REF="${REPSHEET_REF:-c0a619000317444ffde98229ffb93640945ff976}"
+REPSHEET_REF="${REPSHEET_REF:-24a113ad80434271b2f67693dd48ec0aef9ef24a}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEPS="$ROOT/.deps"
@@ -84,7 +86,7 @@ build_repsheet() {
 
 build_nginx() {
   fetch "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" "$SRC/nginx-${NGINX_VERSION}"
-  log "building nginx ${NGINX_VERSION} with ngx_bot_verifier"
+  log "building nginx ${NGINX_VERSION} with ngx_bot_verifier${WITH_REPSHEET:+ (repsheet: ${WITH_REPSHEET})}"
 
   local cc_opt="-g -O1 -Wall -Wextra -Wno-unused-parameter -Werror -I$PREFIX/include"
   local ld_opt="-L$PREFIX/lib"
@@ -93,8 +95,13 @@ build_nginx() {
     ld_opt="$ld_opt -fsanitize=address,undefined"
   fi
 
-  local add_module="--add-module=$ROOT"
-  [[ "${DYNAMIC:-0}" == 1 ]] && add_module="--add-dynamic-module=$ROOT"
+  local flag="--add-module"
+  [[ "${DYNAMIC:-0}" == 1 ]] && flag="--add-dynamic-module"
+  local modules=("$flag=$ROOT")
+  if [[ "${WITH_REPSHEET:-1}" == 1 ]]; then
+    fetch "https://github.com/repsheet/repsheet/archive/${REPSHEET_REF}.tar.gz" "$SRC/repsheet-${REPSHEET_REF}"
+    modules+=("$flag=$SRC/repsheet-${REPSHEET_REF}/nginx")
+  fi
 
   (
     cd "$SRC/nginx-${NGINX_VERSION}"
@@ -104,7 +111,7 @@ build_nginx() {
       --with-http_realip_module \
       --with-cc-opt="$cc_opt" \
       --with-ld-opt="$ld_opt" \
-      "$add_module" >/dev/null
+      "${modules[@]}" >/dev/null
     make -j"$JOBS" >/dev/null
     make install >/dev/null
   )

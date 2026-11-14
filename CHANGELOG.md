@@ -42,6 +42,10 @@ A rewrite. Configuration is not compatible with 0.0.x (see below).
 - `bot_verifier_metrics` (Prometheus).
 - Reporting to Repsheet 6 (`REPSHEET.MARK`/`BLOCK ... BY bot_verifier`),
   replacing the removed `REPSHEET.BLACKLIST`.
+- With the Repsheet nginx module loaded, its `repsheet_redis` and
+  `repsheet_redis_auth` settings are used, so nothing is configured twice
+  (#16). `bot_verifier_redis` overrides them; `bot_verifier_redis off`
+  disables Redis.
 - Tests with pytest against real nginx, a fake DNS server and Valkey; ASan
   and UBSan runs; GitHub Actions; Docker image and compose example.
 - Apache 2.0 license.
@@ -49,7 +53,7 @@ A rewrite. Configuration is not compatible with 0.0.x (see below).
 ### Upgrading from 0.0.x
 | 0.0.x | 1.0 |
 |-------|-----|
-| `bot_verifier_redis_host` + `bot_verifier_redis_port` | `bot_verifier_redis host:port` (optional) |
+| `bot_verifier_redis_host` + `bot_verifier_redis_port` | `repsheet_redis` (with the Repsheet module) or `bot_verifier_redis host:port` (optional) |
 | `bot_verifier_redis_connection_timeout`, `bot_verifier_redis_read_timeout` | `bot_verifier_redis_timeout` |
 | `bot_verifier_redis_expiry` | `bot_verifier_ttl` |
 | `bot_verifier_enable_repsheet on` | `bot_verifier_repsheet mark` or `block` |

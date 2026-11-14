@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from conftest import GOOGLEBOT, Server, free_port, metrics, wait_for
+from conftest import GOOGLEBOT, Server, free_port, has_repsheet_nginx_module, metrics, wait_for
 
 GOOGLE_IP = "66.249.66.1"
 GOOGLE_HOST = "crawl-66-249-66-1.googlebot.com"
@@ -111,18 +111,19 @@ class TestRedisCache:
             s.stop()
 
 
-class TestRepsheet:
-    def check(self, r, actor):
-        reply = r.execute_command("REPSHEET.GET", actor)
-        if isinstance(reply, list):
-            reply = dict(zip(reply[::2], reply[1::2]))
-        return reply
+def repsheet_get(r, actor):
+    reply = r.execute_command("REPSHEET.GET", actor)
+    if isinstance(reply, list):
+        reply = dict(zip(reply[::2], reply[1::2]))
+    return reply
 
+
+class TestRepsheet:
     def test_failed_verification_is_marked(self, dns, r, server, nginx_factory):
         n = nginx_factory(http=redis_http("bot_verifier_repsheet mark 10m;"), redis_port=server.port)
         wait_ready(n)
         assert n.get(ip="203.0.113.9", ua=GOOGLEBOT).status_code == 403
-        d = wait_for(lambda: self.check(r, "203.0.113.9"), message="repsheet report")
+        d = wait_for(lambda: repsheet_get(r, "203.0.113.9"), message="repsheet report")
         assert d["status"] == "mark"
         assert d["by"] == "bot_verifier"
         assert d["reason"] == "bot_verifier: claimed google: no reverse DNS"
@@ -133,7 +134,7 @@ class TestRepsheet:
         n = nginx_factory(http=redis_http("bot_verifier_repsheet block;"), redis_port=server.port)
         wait_ready(n)
         n.get(ip="2001:db8::66", ua=GOOGLEBOT)
-        d = wait_for(lambda: self.check(r, "2001:db8::66"), message="repsheet report")
+        d = wait_for(lambda: repsheet_get(r, "2001:db8::66"), message="repsheet report")
         assert d["status"] == "block" and d["actor"] == "ip:2001:db8::66"
 
     def test_only_fresh_failures_are_reported(self, dns, r, server, nginx_factory):
@@ -141,7 +142,7 @@ class TestRepsheet:
         wait_ready(n)
         for _ in range(3):
             n.get(ip="203.0.113.9", ua=GOOGLEBOT)
-        wait_for(lambda: self.check(r, "203.0.113.9"), message="repsheet report")
+        wait_for(lambda: repsheet_get(r, "203.0.113.9"), message="repsheet report")
         changes = r.xlen("{repsheet}:changes")
         assert changes == 1
 
@@ -174,3 +175,62 @@ class TestRepsheet:
         finally:
             proc.terminate()
             proc.wait()
+
+
+@pytest.fixture
+def with_repsheet_module():
+    if not has_repsheet_nginx_module():
+        pytest.skip("nginx built without the repsheet module (WITH_REPSHEET=0)")
+
+
+class TestRepsheetDirectives:
+    """With the Repsheet nginx module loaded, repsheet_redis is reused (#16)."""
+
+    def test_uses_repsheet_redis(self, with_repsheet_module, dns, r, server, nginx_factory):
+        n = nginx_factory(http="repsheet_redis {redis};\nbot_verifier_repsheet mark;", redis_port=server.port)
+        wait_ready(n)
+        assert n.get(ip="203.0.113.9", ua=GOOGLEBOT).status_code == 403
+        wait_for(lambda: r.get("{bot_verifier}:203.0.113.9") == "failed:google", message="shared cache write")
+        d = wait_for(lambda: repsheet_get(r, "203.0.113.9"), message="repsheet report")
+        assert d["by"] == "bot_verifier"
+
+    def test_uses_repsheet_redis_auth(self, with_repsheet_module, dns, tmp_path, nginx_factory):
+        s = Server(tmp_path, password="s3cret")
+        try:
+            n = nginx_factory(http="repsheet_redis {redis};\nrepsheet_redis_auth s3cret;", redis_port=s.port)
+            wait_ready(n)
+            n.get(ip="203.0.113.9", ua=GOOGLEBOT)
+            wait_for(lambda: s.client.get("{bot_verifier}:203.0.113.9"), message="authenticated write")
+        finally:
+            s.stop()
+
+    def test_bot_verifier_redis_takes_precedence(self, with_repsheet_module, dns, r, server, tmp_path,
+                                                  nginx_factory):
+        other = Server(tmp_path)
+        try:
+            n = nginx_factory(http=f"repsheet_redis {{redis}};\nbot_verifier_redis 127.0.0.1:{other.port};",
+                              redis_port=server.port)
+            wait_ready(n)
+            n.get(ip="203.0.113.9", ua=GOOGLEBOT)
+            wait_for(lambda: other.client.get("{bot_verifier}:203.0.113.9"), message="write to the other server")
+            assert r.get("{bot_verifier}:203.0.113.9") is None
+        finally:
+            other.stop()
+
+    def test_off_ignores_repsheet_redis(self, with_repsheet_module, dns, r, server, nginx_factory):
+        n = nginx_factory(http="repsheet_redis {redis};\nbot_verifier_redis off;", redis_port=server.port)
+        wait_ready(n)
+        assert n.get(ip="203.0.113.9", ua=GOOGLEBOT).status_code == 403
+        time.sleep(0.3)
+        assert r.get("{bot_verifier}:203.0.113.9") is None
+
+    def test_off_and_repsheet_reporting_conflict(self, with_repsheet_module, nginx_factory):
+        with pytest.raises(RuntimeError, match="requires repsheet_redis or bot_verifier_redis"):
+            nginx_factory(http="repsheet_redis 127.0.0.1:6379;\nbot_verifier_redis off;\nbot_verifier_repsheet mark;")
+
+    def test_without_repsheet_redis_nothing_is_shared(self, with_repsheet_module, dns, r, server, nginx_factory):
+        n = nginx_factory(redis_port=server.port)
+        wait_ready(n)
+        n.get(ip="203.0.113.9", ua=GOOGLEBOT)
+        time.sleep(0.3)
+        assert r.dbsize() == 0

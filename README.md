@@ -57,7 +57,9 @@ http {
     bot_verifier_ranges bing   /etc/nginx/bot_ranges/bingbot.json;
 
     # Optional: share results between servers, report fakes to Repsheet.
-    bot_verifier_redis 10.0.0.5:6379;
+    # With the Repsheet nginx module loaded, repsheet_redis is used for both;
+    # otherwise set bot_verifier_redis.
+    repsheet_redis 10.0.0.5:6379;
     bot_verifier_repsheet mark 1h;
 
     # Behind a load balancer, let realip decide the client address.
@@ -89,10 +91,10 @@ http {
 | `bot_verifier_zone_size <size>` | http | `16m` | Shared memory for cached results (128 bytes each). When full, the least recently used results are dropped. |
 | `bot_verifier_provider <name> { ... }` | http | | Add a provider, or replace a built-in one. See below. |
 | `bot_verifier_ranges <provider> <file>...` | http | | Published IP ranges for a provider. |
-| `bot_verifier_redis <address>` | http | none | `host:port`, `[v6]:port` or `unix:/path`. |
-| `bot_verifier_redis_auth [user] <password>` | http | none | |
+| `bot_verifier_redis <address> \| off` | http | `repsheet_redis` | `host:port`, `[v6]:port` or `unix:/path`. Without it, the `repsheet_redis` and `repsheet_redis_auth` settings of the Repsheet nginx module are used if that module is loaded. `off` uses no Redis at all. |
+| `bot_verifier_redis_auth [user] <password>` | http | none | With `bot_verifier_redis`. |
 | `bot_verifier_redis_timeout <time>` | http | `100ms` | How long a request waits for the Redis cache before going to DNS. |
-| `bot_verifier_repsheet off \| mark [ttl] \| block [ttl]` | http | `off` | Report failed verifications to [Repsheet](https://github.com/repsheet/repsheet). Needs `bot_verifier_redis`. TTL defaults to `1h`. |
+| `bot_verifier_repsheet off \| mark [ttl] \| block [ttl]` | http | `off` | Report failed verifications to [Repsheet](https://github.com/repsheet/repsheet). Needs `repsheet_redis` or `bot_verifier_redis`. TTL defaults to `1h`. |
 | `bot_verifier_metrics` | location | | Prometheus metrics. |
 
 nginx refuses to start if `bot_verifier` is on where no `resolver` is
@@ -165,7 +167,15 @@ domains, because the lists can lag behind.
 
 ## Redis and Repsheet
 
-With `bot_verifier_redis`, results are also stored as
+When nginx also runs the [Repsheet](https://github.com/repsheet/repsheet)
+module, there is nothing extra to configure: the bot verifier uses the Redis
+that `repsheet_redis` and `repsheet_redis_auth` point at (Repsheet's module
+publishes those settings for other modules; older Repsheet versions that do
+not are detected and a warning says to set `bot_verifier_redis`). Set
+`bot_verifier_redis` to use a different server, or `bot_verifier_redis off`
+to keep results local.
+
+With Redis configured, results are also stored as
 `{bot_verifier}:<address>` = `verified:google` (with the same TTLs) and read
 by every server before it does any DNS. A request waits at most
 `bot_verifier_redis_timeout` for that read. If Redis is down or slow the
@@ -232,9 +242,12 @@ make nginx       # rebuild nginx after changing the module
 ```
 
 `script/bootstrap` takes `NGINX_VERSION`, `VALKEY_VERSION`,
-`HIREDIS_VERSION`, `REPSHEET_REF`, `DYNAMIC=1` and `SANITIZE=1`. CI covers
-nginx 1.30 (stable) and 1.31 (mainline), static and dynamic builds, and a
-sanitizer run.
+`HIREDIS_VERSION`, `REPSHEET_REF`, `DYNAMIC=1`, `SANITIZE=1` and
+`WITH_REPSHEET=0`. By default the development nginx also includes the
+Repsheet nginx module, so the tests cover the shared settings;
+`WITH_REPSHEET=0` builds the bot verifier alone. CI covers nginx 1.30
+(stable) and 1.31 (mainline), static and dynamic builds, a standalone build,
+and a sanitizer run.
 
 ## History
 

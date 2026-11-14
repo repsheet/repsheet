@@ -12,17 +12,19 @@ env:
 
 jobs:
   test:
-    name: nginx ${{ matrix.nginx }}${{ matrix.dynamic == '1' && ' (dynamic)' || '' }}
+    name: nginx ${{ matrix.nginx }}${{ matrix.dynamic == '1' && ' (dynamic)' || '' }}${{ matrix.repsheet == '0' && ' (standalone)' || '' }}
     runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { nginx: "1.30.6", dynamic: "0" }
-          - { nginx: "1.31.8", dynamic: "1" }
+          - { nginx: "1.30.6", dynamic: "0", repsheet: "1" }
+          - { nginx: "1.31.8", dynamic: "1", repsheet: "1" }
+          - { nginx: "1.30.6", dynamic: "0", repsheet: "0" }
     env:
       NGINX_VERSION: ${{ matrix.nginx }}
       DYNAMIC: ${{ matrix.dynamic }}
+      WITH_REPSHEET: ${{ matrix.repsheet }}
     steps:
       - uses: actions/checkout@v7
 
@@ -45,7 +47,9 @@ jobs:
 
       - name: Load as a dynamic module
         if: matrix.dynamic == '1'
-        run: echo "BOT_VERIFIER_MODULE=$PWD/.deps/nginx/modules/ngx_http_bot_verifier_module.so" >> "$GITHUB_ENV"
+        run: |
+          echo "BOT_VERIFIER_MODULE=$PWD/.deps/nginx/modules/ngx_http_bot_verifier_module.so" >> "$GITHUB_ENV"
+          echo "REPSHEET_NGINX_MODULE=$PWD/.deps/nginx/modules/ngx_http_repsheet_module.so" >> "$GITHUB_ENV"
 
       - name: Test
         run: cd tests && uv run pytest -v
@@ -54,7 +58,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: logs-${{ matrix.nginx }}-${{ matrix.dynamic }}
+          name: logs-${{ matrix.nginx }}-${{ matrix.dynamic }}-${{ matrix.repsheet }}
           path: /tmp/pytest-of-*/
           retention-days: 7
 

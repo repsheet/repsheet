@@ -6,6 +6,7 @@ the Redis cache and reporting tests.
 Binaries are taken from .deps/ (built by script/bootstrap) unless overridden:
   BOT_VERIFIER_NGINX    path to an nginx binary built with the module
   BOT_VERIFIER_MODULE   path to the dynamic module, if built with DYNAMIC=1
+  REPSHEET_NGINX_MODULE path to the Repsheet nginx dynamic module, if built with DYNAMIC=1
   REPSHEET_SERVER       path to valkey-server / redis-server
 """
 
@@ -214,11 +215,13 @@ def repsheet_module():
 
 
 class Server:
-    def __init__(self, tmp, port=None):
+    def __init__(self, tmp, port=None, password=None):
         self.port = port or free_port()
         self.log_path = Path(tmp) / f"server-{self.port}.log"
         args = [server_binary(), "--port", str(self.port), "--bind", "127.0.0.1", "--save", "",
                 "--appendonly", "no", "--dir", str(tmp)]
+        if password:
+            args += ["--requirepass", password]
         module = repsheet_module()
         if module.exists():
             args += ["--loadmodule", str(module)]
@@ -227,7 +230,7 @@ class Server:
             env["ASAN_OPTIONS"] = "detect_leaks=0"
         self.log = open(self.log_path, "a")
         self.proc = subprocess.Popen(args, stdout=self.log, stderr=subprocess.STDOUT, env=env)
-        self.client = redis.Redis(port=self.port, decode_responses=True)
+        self.client = redis.Redis(port=self.port, decode_responses=True, password=password)
         wait_for(self.client.ping, message="valkey to start")
 
     def stop(self):
@@ -254,6 +257,14 @@ def r(server):
 # --------------------------------------------------------------------------
 
 
+def has_repsheet_nginx_module():
+    """True if nginx can use repsheet_* directives (built in, or loadable)."""
+    if os.environ.get("REPSHEET_NGINX_MODULE"):
+        return True
+    out = subprocess.run([nginx_binary(), "-V"], capture_output=True, text=True).stderr
+    return "repsheet" in out and "--add-dynamic-module" not in out
+
+
 def nginx_binary():
     env = os.environ.get("BOT_VERIFIER_NGINX")
     if env:
@@ -275,8 +286,9 @@ class Nginx:
         (self.dir / "html" / "index.html").write_text("hello\n")
         self.port = free_port()
         load = ""
-        if os.environ.get("BOT_VERIFIER_MODULE"):
-            load = f"load_module {os.environ['BOT_VERIFIER_MODULE']};"
+        for env in ("BOT_VERIFIER_MODULE", "REPSHEET_NGINX_MODULE"):
+            if os.environ.get(env):
+                load += f"load_module {os.environ[env]};\n"
         body = (http.replace("{port}", str(self.port))
                     .replace("{resolver}", f"127.0.0.1:{dns_port}")
                     .replace("{redis}", f"127.0.0.1:{redis_port or 1}")

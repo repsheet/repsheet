@@ -87,6 +87,25 @@ typedef struct {
     ngx_uint_t    provider;     /* index; meaningful for every result */
 } bv_verdict_t;
 
+/*
+ * Copy of ngx_http_repsheet_redis_conf_t from the Repsheet nginx module
+ * (nginx/src/ngx_http_repsheet_public.h): the first member of its main
+ * configuration. Only read after checking magic and version.
+ */
+#define BV_REPSHEET_MAGIC 0x52505348
+#define BV_REPSHEET_VERSION 1
+
+typedef struct {
+    uint32_t     magic;
+    uint32_t     version;
+    ngx_flag_t   configured;
+    ngx_str_t    host;
+    ngx_uint_t   port;
+    ngx_str_t    unix_path;
+    ngx_str_t    user;
+    ngx_str_t    password;
+} bv_repsheet_redis_conf_t;
+
 typedef struct {
     ngx_array_t      providers;         /* bv_provider_t */
     ngx_flag_t       providers_custom;
@@ -96,6 +115,8 @@ typedef struct {
 
     /* Valkey/Redis */
     ngx_flag_t       redis;
+    ngx_flag_t       redis_off;         /* bot_verifier_redis off */
+    ngx_flag_t       redis_from_repsheet;
     ngx_str_t        redis_host;
     ngx_uint_t       redis_port;
     ngx_str_t        redis_unix;

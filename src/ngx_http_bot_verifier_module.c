@@ -532,8 +532,13 @@ ngx_http_bot_verifier_redis(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_str_t       *value = cf->args->elts;
     ngx_url_t        u;
 
-    if (mcf->redis) {
+    if (mcf->redis || mcf->redis_off) {
         return "is duplicate";
+    }
+
+    if (value[1].len == 3 && ngx_strncmp(value[1].data, "off", 3) == 0) {
+        mcf->redis_off = 1;   /* also: do not use repsheet_redis */
+        return NGX_CONF_OK;
     }
 
     ngx_memzero(&u, sizeof(ngx_url_t));
@@ -649,6 +654,53 @@ ngx_http_bot_verifier_create_main_conf(ngx_conf_t *cf)
 }
 
 
+/*
+ * With the Repsheet nginx module loaded and repsheet_redis configured, use
+ * its Redis settings unless bot_verifier_redis says otherwise (#16).
+ */
+static void
+bv_use_repsheet_redis(ngx_conf_t *cf, bv_main_conf_t *mcf)
+{
+    ngx_module_t              **modules = cf->cycle->modules;
+    bv_repsheet_redis_conf_t   *rs;
+    ngx_uint_t                  i;
+
+    if (mcf->redis || mcf->redis_off || modules == NULL) {
+        return;
+    }
+
+    for (i = 0; modules[i]; i++) {
+        if (modules[i]->type == NGX_HTTP_MODULE && modules[i]->name
+            && ngx_strcmp(modules[i]->name, "ngx_http_repsheet_module") == 0)
+        {
+            break;
+        }
+    }
+    if (modules[i] == NULL) {
+        return;
+    }
+
+    rs = ((ngx_http_conf_ctx_t *) cf->ctx)->main_conf[modules[i]->ctx_index];
+    if (rs == NULL || rs->magic != BV_REPSHEET_MAGIC) {
+        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                           "bot_verifier: this version of the repsheet module does not share its "
+                           "redis settings; use bot_verifier_redis");
+        return;
+    }
+    if (rs->version < BV_REPSHEET_VERSION || !rs->configured) {
+        return;
+    }
+
+    mcf->redis = 1;
+    mcf->redis_from_repsheet = 1;
+    mcf->redis_host = rs->host;
+    mcf->redis_port = rs->port;
+    mcf->redis_unix = rs->unix_path;
+    mcf->redis_user = rs->user;
+    mcf->redis_password = rs->password;
+}
+
+
 static char *
 ngx_http_bot_verifier_init_main_conf(ngx_conf_t *cf, void *conf)
 {
@@ -668,8 +720,11 @@ ngx_http_bot_verifier_init_main_conf(ngx_conf_t *cf, void *conf)
     ngx_conf_init_size_value(mcf->zone_size, 16 * 1024 * 1024);
     ngx_conf_init_msec_value(mcf->redis_timeout, 100);
 
+    bv_use_repsheet_redis(cf, mcf);
+
     if (mcf->repsheet && !mcf->redis) {
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "bot_verifier_repsheet requires bot_verifier_redis");
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "bot_verifier_repsheet requires repsheet_redis or bot_verifier_redis");
         return NGX_CONF_ERROR;
     }
 

@@ -267,5 +267,5 @@ class TestConfig:
             nginx_factory(location="bot_verifier on; bot_verifier_block_status 200;")
 
     def test_repsheet_requires_redis(self, nginx_factory):
-        with pytest.raises(RuntimeError, match="requires bot_verifier_redis"):
+        with pytest.raises(RuntimeError, match="requires repsheet_redis or bot_verifier_redis"):
             nginx_factory(http="bot_verifier_repsheet mark;")
