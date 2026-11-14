@@ -30,6 +30,7 @@ def test_set_and_get(r, command, status):
     assert d["reason"] == "test"
     assert d["expires"] == 0
     assert d["created"] > 0
+    assert d["by"] == ""
 
 
 def test_latest_decision_replaces_previous(r):
@@ -75,11 +76,57 @@ def test_reason_length_limit(r):
 
 @pytest.mark.parametrize("args", [
     ["TTL", "abc"], ["TTL", "0"], ["TTL", "-5"], ["TTL", "999999999999"],
-    ["BOGUS", "x"], ["REASON"],
+    ["BOGUS", "x"], ["REASON"], ["BY"], ["BY", "x" * 257], ["BY", "a\nb"], ["BY", "a\x7fb"],
 ])
 def test_bad_options(r, args):
     with pytest.raises(redis.ResponseError):
         r.execute_command("REPSHEET.BLOCK", "1.1.1.1", *args)
+
+
+class TestBy:
+    """BY records who made a decision, on the decision and in the change log."""
+
+    def last_change(self, r):
+        _, fields = r.xrevrange("{repsheet}:changes", count=1)[0]
+        return fields
+
+    def test_set_with_by(self, r):
+        r.execute_command("REPSHEET.BLOCK", "1.1.1.1", "REASON", "x", "BY", "alice", "TTL", "60")
+        assert get(r, "1.1.1.1")["by"] == "alice"
+        assert r.hget("{repsheet}:actor:ip:1.1.1.1", "by") == "alice"
+        change = self.last_change(r)
+        assert change["op"] == "set" and change["by"] == "alice" and change["reason"] == "x"
+        assert abs(int(change["at"]) - time.time() * 1000) < 5000
+
+    def test_replacing_resets_by(self, r):
+        r.execute_command("REPSHEET.BLOCK", "1.1.1.1", "BY", "alice")
+        r.execute_command("REPSHEET.ALLOW", "1.1.1.1")
+        assert get(r, "1.1.1.1")["by"] == ""
+        assert self.last_change(r)["by"] == ""
+
+    def test_max_length(self, r):
+        r.execute_command("REPSHEET.MARK", "1.1.1.1", "BY", "é" * 128)  # 256 bytes
+        assert get(r, "1.1.1.1")["by"] == "é" * 128
+
+    def test_clear_with_by(self, r):
+        r.execute_command("REPSHEET.BLOCK", "1.1.1.1", "BY", "alice")
+        assert r.execute_command("REPSHEET.CLEAR", "1.1.1.1", "by", "bob") == 1
+        change = self.last_change(r)
+        assert change["op"] == "del" and change["by"] == "bob"
+
+    @pytest.mark.parametrize("args", [["BY"], ["REASON", "x"], ["BY", "a\tb"], ["BY", "x", "BY", "y"]])
+    def test_clear_bad_options(self, r, args):
+        r.execute_command("REPSHEET.BLOCK", "1.1.1.1")
+        with pytest.raises(redis.ResponseError):
+            r.execute_command("REPSHEET.CLEAR", "1.1.1.1", *args)
+        assert get(r, "1.1.1.1") is not None
+
+    def test_not_in_sync_replies(self, r):
+        r.execute_command("REPSHEET.BLOCK", "1.1.1.1", "BY", "alice")
+        epoch, seq, entries = r.execute_command("REPSHEET.SNAPSHOT")
+        assert entries == [["ip:1.1.1.1", "block", "", 0]]
+        _, _, _, changes = r.execute_command("REPSHEET.CHANGES", "", 0)
+        assert [len(c) for c in changes] == [6]
 
 
 def test_ttl_expires_and_cleans_index(r):
@@ -278,10 +325,11 @@ def test_replicates_to_replica(server, r, tmp_path):
     replica = Server(tmp_path)
     try:
         replica.client.replicaof("127.0.0.1", server.port)
-        r.execute_command("REPSHEET.BLOCK", "1.1.1.1", "REASON", "repl", "TTL", "100")
+        r.execute_command("REPSHEET.BLOCK", "1.1.1.1", "REASON", "repl", "TTL", "100", "BY", "alice")
         from conftest import wait_for
         wait_for(lambda: replica.client.execute_command("REPSHEET.GET", "1.1.1.1"), message="replication")
         assert replica.client.execute_command("REPSHEET.SNAPSHOT") == r.execute_command("REPSHEET.SNAPSHOT")
+        assert get(replica.client, "1.1.1.1")["by"] == "alice"
         with pytest.raises(redis.ReadOnlyError):
             replica.client.execute_command("REPSHEET.BLOCK", "2.2.2.2")
     finally:

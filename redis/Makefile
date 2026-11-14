@@ -27,6 +27,8 @@ repsheet.so: $(OBJS)
 	$(CC) -o $@ $(OBJS) $(SHOBJ_LDFLAGS) $(LDFLAGS)
 
 $(OBJS): .flavor
+.flavor:
+	@echo $(FLAVOR) > $@
 src/repsheet.o: src/repsheet.c include/redismodule.h ../common/repsheet_actor.h
 ../common/repsheet_actor.o: ../common/repsheet_actor.c ../common/repsheet_actor.h
 
