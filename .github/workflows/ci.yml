@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  VALKEY_VERSION: "9.1.3"
+  HIREDIS_VERSION: "1.5.0"
+  REDIS_IMAGE: "redis:8.10.3"
+
+jobs:
+  test:
+    name: ${{ matrix.server }} / nginx ${{ matrix.nginx }}${{ matrix.dynamic == '1' && ' (dynamic)' || '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { server: valkey, nginx: "1.30.6", dynamic: "0" }
+          - { server: valkey, nginx: "1.31.8", dynamic: "1" }
+          - { server: redis,  nginx: "1.30.6", dynamic: "0" }
+    env:
+      NGINX_VERSION: ${{ matrix.nginx }}
+      DYNAMIC: ${{ matrix.dynamic }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -qq -y build-essential libpcre2-dev zlib1g-dev
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            .deps/prefix
+            .deps/src/valkey-${{ env.VALKEY_VERSION }}
+            .deps/src/hiredis-${{ env.HIREDIS_VERSION }}
+          key: deps-${{ runner.os }}-valkey${{ env.VALKEY_VERSION }}-hiredis${{ env.HIREDIS_VERSION }}
+
+      - name: Build dependencies and nginx
+        run: script/bootstrap
+
+      - name: Build module
+        run: make module
+
+      - name: Use Redis instead of Valkey
+        if: matrix.server == 'redis'
+        run: |
+          mkdir -p .deps/redis/bin
+          docker run --rm --entrypoint cat "$REDIS_IMAGE" /usr/local/bin/redis-server > .deps/redis/bin/redis-server
+          chmod +x .deps/redis/bin/redis-server
+          .deps/redis/bin/redis-server --version
+          echo "REPSHEET_SERVER=$PWD/.deps/redis/bin/redis-server" >> "$GITHUB_ENV"
+
+      - name: Load as a dynamic module
+        if: matrix.dynamic == '1'
+        run: echo "REPSHEET_MODULE=$PWD/.deps/nginx/modules/ngx_http_repsheet_module.so" >> "$GITHUB_ENV"
+
+      - name: Test
+        run: cd tests && uv run pytest -v
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.server }}-${{ matrix.nginx }}
+          path: /tmp/pytest-of-*/
+          retention-days: 7
+
+  sanitize:
+    name: ASan / UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -qq -y build-essential libpcre2-dev zlib1g-dev
+      - uses: astral-sh/setup-uv@v6
+      - name: Test with sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: make sanitize

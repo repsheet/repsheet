@@ -46,17 +46,17 @@ static long long changelog_max = DEFAULT_CHANGELOG_MAX;
 /* helpers                                                                   */
 /* ------------------------------------------------------------------------ */
 
-static bool arg_is(RedisModuleString *arg, const char *name) {
+static bool arg_is(RedisModuleString* arg, const char* name) {
   size_t len;
-  const char *s = RedisModule_StringPtrLen(arg, &len);
+  const char* s = RedisModule_StringPtrLen(arg, &len);
   return len == strlen(name) && strncasecmp(s, name, len) == 0;
 }
 
 /* Canonicalize argv actor into `out`. Replies with an error on failure. */
-static bool parse_actor(RedisModuleCtx *ctx, RedisModuleString *arg, char *out, rs_ip_t *ip) {
+static bool parse_actor(RedisModuleCtx* ctx, RedisModuleString* arg, char* out, rs_ip_t* ip) {
   size_t len;
-  const char *s = RedisModule_StringPtrLen(arg, &len);
-  const char *err = NULL;
+  const char* s = RedisModule_StringPtrLen(arg, &len);
+  const char* err = NULL;
   if (rs_actor_canonicalize(s, len, out, RS_ACTOR_MAX + 1, ip, &err) == 0) {
     RedisModule_ReplyWithErrorFormat(ctx, "ERR invalid actor: %s", err);
     return false;
@@ -64,40 +64,40 @@ static bool parse_actor(RedisModuleCtx *ctx, RedisModuleString *arg, char *out, 
   return true;
 }
 
-static RedisModuleString *actor_key(RedisModuleCtx *ctx, const char *actor) {
+static RedisModuleString* actor_key(RedisModuleCtx* ctx, const char* actor) {
   return RedisModule_CreateStringPrintf(ctx, KEY_PREFIX "%s", actor);
 }
 
-static long long reply_integer(RedisModuleCallReply *reply) {
+static long long reply_integer(RedisModuleCallReply* reply) {
   if (reply == NULL || RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_INTEGER) return -1;
   return RedisModule_CallReplyInteger(reply);
 }
 
 /* Read a field from a hash key opened for reading. Returns NULL if missing. */
-static RedisModuleString *hash_get(RedisModuleKey *key, const char *field) {
-  RedisModuleString *value = NULL;
+static RedisModuleString* hash_get(RedisModuleKey* key, const char* field) {
+  RedisModuleString* value = NULL;
   /* Opening a missing key for reading yields NULL. */
   if (key == NULL || RedisModule_KeyType(key) != REDISMODULE_KEYTYPE_HASH) return NULL;
   RedisModule_HashGet(key, REDISMODULE_HASH_CFIELDS, field, &value, NULL);
   return value;
 }
 
-static long long string_ll(RedisModuleString *s, long long fallback) {
+static long long string_ll(RedisModuleString* s, long long fallback) {
   long long v;
   if (s == NULL || RedisModule_StringToLongLong(s, &v) != REDISMODULE_OK) return fallback;
   return v;
 }
 
 /* Current epoch, creating one if the dataset is new. `epoch` is EPOCH_LEN+1. */
-static void ensure_epoch(RedisModuleCtx *ctx, char *epoch, bool create) {
-  RedisModuleKey *meta = RedisModule_OpenKey(ctx, RedisModule_CreateString(ctx, KEY_META, strlen(KEY_META)),
-                                             REDISMODULE_READ);
-  RedisModuleString *value = hash_get(meta, "epoch");
+static void ensure_epoch(RedisModuleCtx* ctx, char* epoch, bool create) {
+  RedisModuleKey* meta =
+      RedisModule_OpenKey(ctx, RedisModule_CreateString(ctx, KEY_META, strlen(KEY_META)), REDISMODULE_READ);
+  RedisModuleString* value = hash_get(meta, "epoch");
   RedisModule_CloseKey(meta);
 
   if (value != NULL) {
     size_t len;
-    const char *s = RedisModule_StringPtrLen(value, &len);
+    const char* s = RedisModule_StringPtrLen(value, &len);
     snprintf(epoch, EPOCH_LEN + 1, "%.*s", (int)len, s);
     return;
   }
@@ -112,17 +112,17 @@ static void ensure_epoch(RedisModuleCtx *ctx, char *epoch, bool create) {
   RedisModule_Call(ctx, "HSET", "!ccc", KEY_META, "epoch", epoch);
 }
 
-static long long current_seq(RedisModuleCtx *ctx) {
-  RedisModuleKey *meta = RedisModule_OpenKey(ctx, RedisModule_CreateString(ctx, KEY_META, strlen(KEY_META)),
-                                             REDISMODULE_READ);
+static long long current_seq(RedisModuleCtx* ctx) {
+  RedisModuleKey* meta =
+      RedisModule_OpenKey(ctx, RedisModule_CreateString(ctx, KEY_META, strlen(KEY_META)), REDISMODULE_READ);
   long long seq = string_ll(hash_get(meta, "seq"), 0);
   RedisModule_CloseKey(meta);
   return seq;
 }
 
 /* Append a change to the log and wake up subscribers. */
-static void record_change(RedisModuleCtx *ctx, const char *op, const char *actor, const char *status,
-                          RedisModuleString *reason, long long expires) {
+static void record_change(RedisModuleCtx* ctx, const char* op, const char* actor, const char* status,
+                          RedisModuleString* reason, long long expires) {
   char epoch[EPOCH_LEN + 1];
   ensure_epoch(ctx, epoch, true);
 
@@ -130,12 +130,11 @@ static void record_change(RedisModuleCtx *ctx, const char *op, const char *actor
 
   char id[32];
   snprintf(id, sizeof(id), "%lld-0", seq);
-  RedisModuleString *empty = RedisModule_CreateString(ctx, "", 0);
+  RedisModuleString* empty = RedisModule_CreateString(ctx, "", 0);
   RedisModule_Call(ctx, "XADD", "!cclccccccccscl", KEY_CHANGES, "MAXLEN", changelog_max, id, "op", op,
-                   "actor", actor, "status", status, "reason", reason ? reason : empty, "expires",
-                   expires);
+                   "actor", actor, "status", status, "reason", reason ? reason : empty, "expires", expires);
 
-  RedisModuleString *message = RedisModule_CreateStringPrintf(ctx, "%s:%lld", epoch, seq);
+  RedisModuleString* message = RedisModule_CreateStringPrintf(ctx, "%s:%lld", epoch, seq);
   RedisModule_Call(ctx, "PUBLISH", "cs", CHANNEL_NOTIFY, message);
 }
 
@@ -143,14 +142,14 @@ static void record_change(RedisModuleCtx *ctx, const char *op, const char *actor
 /* REPSHEET.ALLOW | BLOCK | MARK <actor> [REASON <text>] [TTL <seconds>]     */
 /* ------------------------------------------------------------------------ */
 
-static int set_decision(RedisModuleCtx *ctx, RedisModuleString **argv, int argc, rs_status_t status) {
+static int set_decision(RedisModuleCtx* ctx, RedisModuleString** argv, int argc, rs_status_t status) {
   if (argc < 2 || argc % 2 != 0) return RedisModule_WrongArity(ctx);
   RedisModule_AutoMemory(ctx);
 
   char actor[RS_ACTOR_MAX + 1];
   if (!parse_actor(ctx, argv[1], actor, NULL)) return REDISMODULE_OK;
 
-  RedisModuleString *reason = RedisModule_CreateString(ctx, "", 0);
+  RedisModuleString* reason = RedisModule_CreateString(ctx, "", 0);
   long long ttl = 0;
 
   for (int i = 2; i < argc; i += 2) {
@@ -172,12 +171,12 @@ static int set_decision(RedisModuleCtx *ctx, RedisModuleString **argv, int argc,
 
   long long now = RedisModule_Milliseconds();
   long long expires = ttl > 0 ? now + ttl * 1000 : 0;
-  const char *status_name = rs_status_name(status);
-  RedisModuleString *key = actor_key(ctx, actor);
+  const char* status_name = rs_status_name(status);
+  RedisModuleString* key = actor_key(ctx, actor);
 
   RedisModule_Call(ctx, "DEL", "!s", key);
-  RedisModule_Call(ctx, "HSET", "!scccsclcl", key, "status", status_name, "reason", reason, "created",
-                   now, "expires", expires);
+  RedisModule_Call(ctx, "HSET", "!scccsclcl", key, "status", status_name, "reason", reason, "created", now,
+                   "expires", expires);
   if (expires > 0) RedisModule_Call(ctx, "PEXPIREAT", "!sl", key, expires);
   RedisModule_Call(ctx, "SADD", "!cc", KEY_INDEX, actor);
 
@@ -185,15 +184,15 @@ static int set_decision(RedisModuleCtx *ctx, RedisModuleString **argv, int argc,
   return RedisModule_ReplyWithSimpleString(ctx, "OK");
 }
 
-static int AllowCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+static int AllowCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc) {
   return set_decision(ctx, argv, argc, RS_STATUS_ALLOW);
 }
 
-static int BlockCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+static int BlockCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc) {
   return set_decision(ctx, argv, argc, RS_STATUS_BLOCK);
 }
 
-static int MarkCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+static int MarkCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc) {
   return set_decision(ctx, argv, argc, RS_STATUS_MARK);
 }
 
@@ -201,7 +200,7 @@ static int MarkCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
 /* REPSHEET.CLEAR <actor>                                                    */
 /* ------------------------------------------------------------------------ */
 
-static int ClearCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+static int ClearCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc) {
   if (argc != 2) return RedisModule_WrongArity(ctx);
   RedisModule_AutoMemory(ctx);
 
@@ -221,13 +220,13 @@ static int ClearCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
 
 typedef struct {
   rs_status_t status;
-  RedisModuleString *reason;
+  RedisModuleString* reason;
   long long created;
   long long expires;
 } decision_t;
 
-static bool load_decision(RedisModuleCtx *ctx, const char *actor, decision_t *d) {
-  RedisModuleKey *key = RedisModule_OpenKey(ctx, actor_key(ctx, actor), REDISMODULE_READ);
+static bool load_decision(RedisModuleCtx* ctx, const char* actor, decision_t* d) {
+  RedisModuleKey* key = RedisModule_OpenKey(ctx, actor_key(ctx, actor), REDISMODULE_READ);
   if (RedisModule_KeyType(key) != REDISMODULE_KEYTYPE_HASH) {
     RedisModule_CloseKey(key);
     return false;
@@ -235,12 +234,12 @@ static bool load_decision(RedisModuleCtx *ctx, const char *actor, decision_t *d)
 
   RedisModuleString *status = NULL, *created = NULL, *expires = NULL;
   d->reason = NULL;
-  RedisModule_HashGet(key, REDISMODULE_HASH_CFIELDS, "status", &status, "reason", &d->reason,
-                      "created", &created, "expires", &expires, NULL);
+  RedisModule_HashGet(key, REDISMODULE_HASH_CFIELDS, "status", &status, "reason", &d->reason, "created",
+                      &created, "expires", &expires, NULL);
   RedisModule_CloseKey(key);
 
   size_t len;
-  const char *s = status ? RedisModule_StringPtrLen(status, &len) : NULL;
+  const char* s = status ? RedisModule_StringPtrLen(status, &len) : NULL;
   if (s == NULL || rs_status_parse(s, len, &d->status) != 0) return false;
 
   d->created = string_ll(created, 0);
@@ -250,7 +249,7 @@ static bool load_decision(RedisModuleCtx *ctx, const char *actor, decision_t *d)
   return true;
 }
 
-static int GetCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+static int GetCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc) {
   if (argc != 2) return RedisModule_WrongArity(ctx);
   RedisModule_AutoMemory(ctx);
 
@@ -285,11 +284,11 @@ static int GetCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
 
 typedef struct {
   rs_status_t status;
-  RedisModuleString *reason;
+  RedisModuleString* reason;
   char actor[RS_ACTOR_MAX + 1];
 } verdict_t;
 
-static void consider(RedisModuleCtx *ctx, verdict_t *v, const char *actor) {
+static void consider(RedisModuleCtx* ctx, verdict_t* v, const char* actor) {
   decision_t d;
   if (!load_decision(ctx, actor, &d)) return;
   if (d.status > v->status) {
@@ -299,7 +298,7 @@ static void consider(RedisModuleCtx *ctx, verdict_t *v, const char *actor) {
   }
 }
 
-static int CheckCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+static int CheckCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc) {
   if (argc < 2) return RedisModule_WrongArity(ctx);
   RedisModule_AutoMemory(ctx);
 
@@ -343,7 +342,7 @@ static int CheckCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
 /* Read-only, so enforcement points may sync from a replica.               */
 /* ------------------------------------------------------------------------ */
 
-static int SnapshotCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+static int SnapshotCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc) {
   if (argc != 1) return RedisModule_WrongArity(ctx);
   RedisModule_AutoMemory(ctx);
 
@@ -355,13 +354,13 @@ static int SnapshotCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int ar
   RedisModule_ReplyWithLongLong(ctx, current_seq(ctx));
   RedisModule_ReplyWithArray(ctx, REDISMODULE_POSTPONED_LEN);
 
-  RedisModuleCallReply *members = RedisModule_Call(ctx, "SMEMBERS", "c", KEY_INDEX);
+  RedisModuleCallReply* members = RedisModule_Call(ctx, "SMEMBERS", "c", KEY_INDEX);
   size_t n = RedisModule_CallReplyLength(members);
   long emitted = 0;
 
   for (size_t i = 0; i < n; i++) {
     size_t len;
-    const char *s = RedisModule_CallReplyStringPtr(RedisModule_CallReplyArrayElement(members, i), &len);
+    const char* s = RedisModule_CallReplyStringPtr(RedisModule_CallReplyArrayElement(members, i), &len);
     char actor[RS_ACTOR_MAX + 1];
     if (len > RS_ACTOR_MAX) continue;
     memcpy(actor, s, len);
@@ -394,23 +393,23 @@ static int SnapshotCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int ar
 /* still complete; it adopts the epoch returned here.                        */
 /* ------------------------------------------------------------------------ */
 
-static int reply_resync(RedisModuleCtx *ctx) {
+static int reply_resync(RedisModuleCtx* ctx) {
   RedisModule_ReplyWithArray(ctx, 1);
   return RedisModule_ReplyWithSimpleString(ctx, "RESYNC");
 }
 
-static long long entry_seq(RedisModuleCallReply *entry) {
+static long long entry_seq(RedisModuleCallReply* entry) {
   size_t len;
-  const char *id = RedisModule_CallReplyStringPtr(RedisModule_CallReplyArrayElement(entry, 0), &len);
+  const char* id = RedisModule_CallReplyStringPtr(RedisModule_CallReplyArrayElement(entry, 0), &len);
   return id ? strtoll(id, NULL, 10) : -1;
 }
 
-static RedisModuleCallReply *entry_field(RedisModuleCallReply *entry, const char *name) {
-  RedisModuleCallReply *fields = RedisModule_CallReplyArrayElement(entry, 1);
+static RedisModuleCallReply* entry_field(RedisModuleCallReply* entry, const char* name) {
+  RedisModuleCallReply* fields = RedisModule_CallReplyArrayElement(entry, 1);
   size_t n = RedisModule_CallReplyLength(fields);
   for (size_t i = 0; i + 1 < n; i += 2) {
     size_t len;
-    const char *f = RedisModule_CallReplyStringPtr(RedisModule_CallReplyArrayElement(fields, i), &len);
+    const char* f = RedisModule_CallReplyStringPtr(RedisModule_CallReplyArrayElement(fields, i), &len);
     if (f && len == strlen(name) && memcmp(f, name, len) == 0) {
       return RedisModule_CallReplyArrayElement(fields, i + 1);
     }
@@ -418,8 +417,8 @@ static RedisModuleCallReply *entry_field(RedisModuleCallReply *entry, const char
   return NULL;
 }
 
-static void reply_field(RedisModuleCtx *ctx, RedisModuleCallReply *entry, const char *name) {
-  RedisModuleCallReply *value = entry_field(entry, name);
+static void reply_field(RedisModuleCtx* ctx, RedisModuleCallReply* entry, const char* name) {
+  RedisModuleCallReply* value = entry_field(entry, name);
   if (value == NULL) {
     RedisModule_ReplyWithCString(ctx, "");
   } else {
@@ -427,7 +426,7 @@ static void reply_field(RedisModuleCtx *ctx, RedisModuleCallReply *entry, const 
   }
 }
 
-static int ChangesCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+static int ChangesCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc) {
   if (argc != 3 && argc != 5) return RedisModule_WrongArity(ctx);
   RedisModule_AutoMemory(ctx);
 
@@ -445,7 +444,7 @@ static int ChangesCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int arg
   char epoch[EPOCH_LEN + 1];
   ensure_epoch(ctx, epoch, false);
   size_t elen;
-  const char *client_epoch = RedisModule_StringPtrLen(argv[1], &elen);
+  const char* client_epoch = RedisModule_StringPtrLen(argv[1], &elen);
   bool from_empty = elen == 0 && since == 0;
   if (!from_empty && (elen != strlen(epoch) || memcmp(client_epoch, epoch, elen) != 0)) {
     return reply_resync(ctx);
@@ -456,14 +455,15 @@ static int ChangesCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int arg
 
   if (since < seq) {
     /* The log must still hold the entry right after `since`. */
-    RedisModuleCallReply *first = RedisModule_Call(ctx, "XRANGE", "ccccl", KEY_CHANGES, "-", "+", "COUNT", 1LL);
+    RedisModuleCallReply* first =
+        RedisModule_Call(ctx, "XRANGE", "ccccl", KEY_CHANGES, "-", "+", "COUNT", 1LL);
     if (RedisModule_CallReplyLength(first) == 0) return reply_resync(ctx);
     if (entry_seq(RedisModule_CallReplyArrayElement(first, 0)) > since + 1) return reply_resync(ctx);
   }
 
   char start[32];
   snprintf(start, sizeof(start), "%lld-0", since + 1);
-  RedisModuleCallReply *entries =
+  RedisModuleCallReply* entries =
       since < seq ? RedisModule_Call(ctx, "XRANGE", "ccccl", KEY_CHANGES, start, "+", "COUNT", count) : NULL;
   size_t n = entries ? RedisModule_CallReplyLength(entries) : 0;
   long long cursor = since;
@@ -476,7 +476,7 @@ static int ChangesCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int arg
   RedisModule_ReplyWithArray(ctx, (long)n);
 
   for (size_t i = 0; i < n; i++) {
-    RedisModuleCallReply *entry = RedisModule_CallReplyArrayElement(entries, i);
+    RedisModuleCallReply* entry = RedisModule_CallReplyArrayElement(entries, i);
     RedisModule_ReplyWithArray(ctx, 6);
     RedisModule_ReplyWithLongLong(ctx, entry_seq(entry));
     reply_field(ctx, entry, "op");
@@ -492,7 +492,7 @@ static int ChangesCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int arg
 /* REPSHEET.VERSION                                                          */
 /* ------------------------------------------------------------------------ */
 
-static int VersionCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+static int VersionCommand(RedisModuleCtx* ctx, RedisModuleString** argv, int argc) {
   if (argc != 1) return RedisModule_WrongArity(ctx);
   return RedisModule_ReplyWithSimpleString(ctx, REPSHEET_VERSION);
 }
@@ -501,21 +501,23 @@ static int VersionCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int arg
 /* Expiry: drop expired actors from the index.                               */
 /* ------------------------------------------------------------------------ */
 
-static void free_string(void *p) { RedisModule_Free(p); }
-
-static void remove_from_index(RedisModuleCtx *ctx, void *actor) {
-  RedisModule_Call(ctx, "SREM", "!cc", KEY_INDEX, (const char *)actor);
+static void free_string(void* p) {
+  RedisModule_Free(p);
 }
 
-static int on_expired(RedisModuleCtx *ctx, int type, const char *event, RedisModuleString *key) {
+static void remove_from_index(RedisModuleCtx* ctx, void* actor) {
+  RedisModule_Call(ctx, "SREM", "!cc", KEY_INDEX, (const char*)actor);
+}
+
+static int on_expired(RedisModuleCtx* ctx, int type, const char* event, RedisModuleString* key) {
   if (RedisModule_GetContextFlags(ctx) & REDISMODULE_CTX_FLAGS_SLAVE) return REDISMODULE_OK;
 
   size_t len;
-  const char *k = RedisModule_StringPtrLen(key, &len);
+  const char* k = RedisModule_StringPtrLen(key, &len);
   size_t plen = strlen(KEY_PREFIX);
   if (len <= plen || memcmp(k, KEY_PREFIX, plen) != 0) return REDISMODULE_OK;
 
-  char *actor = RedisModule_Alloc(len - plen + 1);
+  char* actor = RedisModule_Alloc(len - plen + 1);
   memcpy(actor, k + plen, len - plen);
   actor[len - plen] = '\0';
   if (RedisModule_AddPostNotificationJob(ctx, remove_from_index, actor, free_string) != REDISMODULE_OK) {
@@ -529,24 +531,21 @@ static int on_expired(RedisModuleCtx *ctx, int type, const char *event, RedisMod
 /* ------------------------------------------------------------------------ */
 
 typedef struct {
-  const char *name;
+  const char* name;
   RedisModuleCmdFunc fn;
-  const char *flags;
+  const char* flags;
 } command_t;
 
 static const command_t commands[] = {
-    {"repsheet.allow", AllowCommand, "write deny-oom"},
-    {"repsheet.block", BlockCommand, "write deny-oom"},
-    {"repsheet.mark", MarkCommand, "write deny-oom"},
-    {"repsheet.clear", ClearCommand, "write"},
-    {"repsheet.get", GetCommand, "readonly fast"},
-    {"repsheet.check", CheckCommand, "readonly"},
-    {"repsheet.snapshot", SnapshotCommand, "readonly"},
-    {"repsheet.changes", ChangesCommand, "readonly"},
+    {"repsheet.allow", AllowCommand, "write deny-oom"},    {"repsheet.block", BlockCommand, "write deny-oom"},
+    {"repsheet.mark", MarkCommand, "write deny-oom"},      {"repsheet.clear", ClearCommand, "write"},
+    {"repsheet.get", GetCommand, "readonly fast"},         {"repsheet.check", CheckCommand, "readonly"},
+    {"repsheet.snapshot", SnapshotCommand, "readonly"},    {"repsheet.changes", ChangesCommand, "readonly"},
     {"repsheet.version", VersionCommand, "readonly fast"},
 };
 
-__attribute__((visibility("default"))) int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+__attribute__((visibility("default"))) int RedisModule_OnLoad(RedisModuleCtx* ctx, RedisModuleString** argv,
+                                                              int argc) {
   if (RedisModule_Init(ctx, "repsheet", REPSHEET_VERSION_NUM, REDISMODULE_APIVER_1) == REDISMODULE_ERR) {
     return REDISMODULE_ERR;
   }

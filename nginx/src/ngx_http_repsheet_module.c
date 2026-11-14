@@ -176,7 +176,10 @@ ngx_http_repsheet_lookup_actor(ngx_http_request_t *r, ngx_http_repsheet_store_t 
 
     /* "repsheet_actor ip $http_x_client_ip" matches networks like the client address. */
     if (actor->type.len == 2 && ngx_strncmp(actor->type.data, "ip", 2) == 0) {
-        if (rs_ip_parse((char *) value.data, value.len, &ip) == 0) {
+        /* Only a single address: "0.0.0.0/0" must not skip specific entries. */
+        if (ngx_strlchr(value.data, value.data + value.len, '/') == NULL
+            && rs_ip_parse((char *) value.data, value.len, &ip) == 0)
+        {
             ngx_http_repsheet_store_lookup_ip(store, &ip, v, r->pool);
         }
         return;
@@ -698,17 +701,26 @@ static ngx_int_t
 ngx_http_repsheet_init(ngx_conf_t *cf)
 {
     ngx_http_handler_pt        *h;
+    ngx_array_t                *handlers;
     ngx_http_core_main_conf_t  *cmcf;
 
     cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
 
-    /* PREACCESS rather than ACCESS: a block must not be overridden by "satisfy any". */
-    h = ngx_array_push(&cmcf->phases[NGX_HTTP_PREACCESS_PHASE].handlers);
+    /*
+     * PREACCESS rather than ACCESS: a block must not be overridden by
+     * "satisfy any". Handlers of a phase run in reverse order of registration,
+     * so put ours at the front of the array to run after the realip module's
+     * PREACCESS handler (realip configured at location level).
+     */
+    handlers = &cmcf->phases[NGX_HTTP_PREACCESS_PHASE].handlers;
+    h = ngx_array_push(handlers);
     if (h == NULL) {
         return NGX_ERROR;
     }
 
-    *h = ngx_http_repsheet_handler;
+    h = handlers->elts;
+    ngx_memmove(&h[1], &h[0], (handlers->nelts - 1) * sizeof(ngx_http_handler_pt));
+    h[0] = ngx_http_repsheet_handler;
     return NGX_OK;
 }
 

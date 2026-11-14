@@ -171,6 +171,13 @@ class TestActors:
         assert n.get(headers={"X-Client-IP": "2001:db9::5"}).status_code == 200
         assert n.get(headers={"X-Client-IP": "garbage"}).status_code == 200
 
+    def test_ip_actor_from_header_rejects_networks(self, nginx_factory, r):
+        n = nginx_factory(conf("    repsheet_actor ip $http_x_client_ip;"))
+        r.execute_command("REPSHEET.BLOCK", "198.51.100.0/24")
+        wait_status(n, 403, headers={"X-Client-IP": "198.51.100.7"})
+        # Network notation from a request is ignored rather than matched.
+        assert n.get("/vars", headers={"X-Client-IP": "198.51.100.0/24"}).text == "||"
+
     def test_location_actors_override_inherited(self, nginx_factory, r):
         n = nginx_factory(conf(
             "    repsheet_actor session $cookie_sid;",
@@ -200,6 +207,21 @@ class TestProxies:
         assert n.get(headers={"X-Forwarded-For": "198.51.100.1"}).status_code == 200
         # Left-most spoofed entries are ignored; the last untrusted hop is used.
         assert n.get(headers={"X-Forwarded-For": "2001:db8::1, 198.51.100.1"}).status_code == 200
+
+
+    def test_realip_in_location(self, nginx_factory, r):
+        n = nginx_factory(conf(locations=(
+            "location /behind-proxy {\n"
+            "    set_real_ip_from 127.0.0.1;\n"
+            "    real_ip_header X-Real-IP;\n"
+            "    try_files /index.html =404;\n"
+            "}"
+        )))
+        r.execute_command("REPSHEET.BLOCK", "203.0.113.9")
+        r.execute_command("REPSHEET.MARK", "127.0.0.1")
+        wait_for(lambda: n.get("/vars").text.startswith("mark"))
+        assert n.get("/behind-proxy", headers={"X-Real-IP": "203.0.113.9"}).status_code == 403
+        assert n.get("/behind-proxy", headers={"X-Real-IP": "203.0.113.10"}).status_code == 200
 
 
 class TestSync:

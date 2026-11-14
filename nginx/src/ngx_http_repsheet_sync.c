@@ -388,9 +388,9 @@ on_changes(redisAsyncContext *ac, void *r, void *privdata)
     (void) ngx_atomic_fetch_add(&sh->counters.changes, changes->elements);
     mark_synced();
 
-    /* A full page means there is more to read right away. */
-    sync_state.more = changes->elements == CHANGES_PAGE;
-    if (sync_state.more) {
+    /* A full page, or a notification during this poll: read again now. */
+    if (sync_state.more || changes->elements == CHANGES_PAGE) {
+        sync_state.more = 0;
         schedule(0);
     }
 }
@@ -432,9 +432,14 @@ on_notify(redisAsyncContext *ac, void *r, void *privdata)
     if (reply->type == REDIS_REPLY_ARRAY && reply->elements == 3
         && reply->element[0]->type == REDIS_REPLY_STRING
         && ngx_strcmp(reply->element[0]->str, "message") == 0
-        && !sync_state.busy && sync_state.cmd_ready)
+        && sync_state.cmd_ready)
     {
-        schedule(0);
+        if (sync_state.busy) {
+            /* Poll again as soon as the one in flight finishes. */
+            sync_state.more = 1;
+        } else {
+            schedule(0);
+        }
     }
 }
 

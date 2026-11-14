@@ -1,0 +1,8 @@
+# Style for common/ and redis/. The nginx module follows nginx's own style
+# and is not formatted with clang-format.
+BasedOnStyle: Google
+IndentWidth: 2
+ColumnLimit: 110
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: WithoutElse
+SortIncludes: false

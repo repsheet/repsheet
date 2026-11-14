@@ -8,14 +8,14 @@
 #include <string.h>
 #include <sys/socket.h>
 
-static const char *status_names[] = {"none", "mark", "block", "allow"};
+static const char* status_names[] = {"none", "mark", "block", "allow"};
 
-const char *rs_status_name(rs_status_t status) {
+const char* rs_status_name(rs_status_t status) {
   if (status > RS_STATUS_ALLOW) return "none";
   return status_names[status];
 }
 
-int rs_status_parse(const char *s, size_t len, rs_status_t *out) {
+int rs_status_parse(const char* s, size_t len, rs_status_t* out) {
   for (int i = RS_STATUS_MARK; i <= RS_STATUS_ALLOW; i++) {
     if (strlen(status_names[i]) == len && memcmp(status_names[i], s, len) == 0) {
       *out = (rs_status_t)i;
@@ -25,7 +25,7 @@ int rs_status_parse(const char *s, size_t len, rs_status_t *out) {
   return -1;
 }
 
-void rs_ip_mask(rs_ip_t *ip, uint8_t prefix) {
+void rs_ip_mask(rs_ip_t* ip, uint8_t prefix) {
   size_t bytes = ip->family == 4 ? 4 : 16;
   ip->prefix = prefix;
   for (size_t i = 0; i < bytes; i++) {
@@ -41,7 +41,7 @@ void rs_ip_mask(rs_ip_t *ip, uint8_t prefix) {
 
 static const uint8_t v4mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
 
-void rs_ip_from_bytes(rs_ip_t *ip, int family, const uint8_t *bytes) {
+void rs_ip_from_bytes(rs_ip_t* ip, int family, const uint8_t* bytes) {
   memset(ip, 0, sizeof(*ip));
   if (family == 6 && memcmp(bytes, v4mapped, sizeof(v4mapped)) == 0) {
     ip->family = 4;
@@ -54,17 +54,17 @@ void rs_ip_from_bytes(rs_ip_t *ip, int family, const uint8_t *bytes) {
   memcpy(ip->addr, bytes, family == 4 ? 4 : 16);
 }
 
-int rs_ip_parse(const char *s, size_t len, rs_ip_t *ip) {
+int rs_ip_parse(const char* s, size_t len, rs_ip_t* ip) {
   char buf[INET6_ADDRSTRLEN + 5];
   if (len == 0 || len >= sizeof(buf)) return -1;
   memcpy(buf, s, len);
   buf[len] = '\0';
 
   int prefix = -1;
-  char *slash = strchr(buf, '/');
+  char* slash = strchr(buf, '/');
   if (slash != NULL) {
     *slash = '\0';
-    const char *p = slash + 1;
+    const char* p = slash + 1;
     if (*p == '\0' || strlen(p) > 3) return -1;
     prefix = 0;
     for (; *p; p++) {
@@ -98,7 +98,7 @@ int rs_ip_parse(const char *s, size_t len, rs_ip_t *ip) {
   return 0;
 }
 
-size_t rs_ip_format(const rs_ip_t *ip, char *out, size_t outlen) {
+size_t rs_ip_format(const rs_ip_t* ip, char* out, size_t outlen) {
   char addr[INET6_ADDRSTRLEN];
   if (inet_ntop(ip->family == 4 ? AF_INET : AF_INET6, ip->addr, addr, sizeof(addr)) == NULL) {
     return 0;
@@ -110,7 +110,7 @@ size_t rs_ip_format(const rs_ip_t *ip, char *out, size_t outlen) {
   return (size_t)n;
 }
 
-size_t rs_ip_key(const rs_ip_t *ip, uint8_t *out) {
+size_t rs_ip_key(const rs_ip_t* ip, uint8_t* out) {
   size_t bytes = ip->family == 4 ? 4 : 16;
   out[0] = 'I';
   out[1] = ip->family;
@@ -123,8 +123,8 @@ static int valid_type_char(char c) {
   return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
 }
 
-size_t rs_actor_canonicalize(const char *in, size_t len, char *out, size_t outlen, rs_ip_t *ip,
-                             const char **err) {
+size_t rs_actor_canonicalize(const char* in, size_t len, char* out, size_t outlen, rs_ip_t* ip,
+                             const char** err) {
   rs_ip_t local;
   if (ip == NULL) ip = &local;
   memset(ip, 0, sizeof(*ip));
@@ -132,14 +132,14 @@ size_t rs_actor_canonicalize(const char *in, size_t len, char *out, size_t outle
   /* Bare address or network. */
   if (rs_ip_parse(in, len, ip) == 0) goto format_ip;
 
-  const char *colon = memchr(in, ':', len);
+  const char* colon = memchr(in, ':', len);
   if (colon == NULL || colon == in) {
     *err = "actor must be an IP address, a network, or <type>:<value>";
     return 0;
   }
 
   size_t tlen = (size_t)(colon - in);
-  const char *value = colon + 1;
+  const char* value = colon + 1;
   size_t vlen = len - tlen - 1;
   char type[RS_TYPE_MAX + 1];
 
