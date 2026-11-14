@@ -4,6 +4,8 @@
 # admin UI on http://localhost:8090 (no login; published on loopback only).
 # Manage decisions with:
 #   docker compose -f examples/docker-compose.yml exec valkey valkey-cli REPSHEET.BLOCK 172.16.0.0/12 REASON demo
+name: repsheet
+
 services:
   valkey:
     build:
