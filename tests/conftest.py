@@ -95,9 +95,8 @@ class Server:
         self.proc.terminate()
         self.proc.wait(timeout=10)
         self.log.close()
-        text = self.log_path.read_text()
-        for marker in ("AddressSanitizer", "repsheet.c:", "repsheet_actor.c:", "BUG REPORT"):
-            assert marker not in text, f"server log contains {marker!r}:\n{text[-6000:]}"
+        problem = sanitizer_problem(self.log_path.read_text())
+        assert problem is None, f"server log shows a crash or sanitizer report:\n{problem}"
 
 
 @pytest.fixture(scope="session")
@@ -130,24 +129,20 @@ def nginx_binary():
     pytest.skip("nginx with repsheet not built; run script/bootstrap")
 
 
-OUR_CODE = ("ngx_http_repsheet_", "repsheet_actor", "hiredis-")
+UBSAN_SUPP = Path(__file__).with_name("ubsan.supp")
 
 
 def sanitizer_problem(text):
-    """Return the offending report if `text` shows a crash, a memory error, or
-    undefined behaviour involving repsheet or hiredis code. UBSan reports that
-    are entirely inside nginx core are known and benign (memcpy of 0 bytes)."""
+    """Return the offending report if `text` shows a crash, an ASan error, or
+    any UBSan report. Reports are not filtered by where they come from: UB in
+    nginx or Valkey reached through our code is still our bug, and filtering
+    by nearby text made the check depend on timing and symbolization."""
+    for marker in ("AddressSanitizer", "runtime error:", "BUG REPORT"):
+        if marker in text:
+            i = text.index(marker)
+            return text[max(0, i - 300): i + 6000]
     if "exited on signal" in text:
         return text[-4000:]
-    if "AddressSanitizer" in text:
-        i = text.index("AddressSanitizer")
-        return text[max(0, i - 200): i + 6000]
-    lines = text.splitlines()
-    for i, line in enumerate(lines):
-        if "runtime error:" in line:
-            block = "\n".join(lines[i: i + 25])
-            if any(s in block for s in OUR_CODE):
-                return block
     return None
 
 
@@ -195,7 +190,7 @@ http {{
         # detection is off; ASan memory errors and UBSan reports still count.
         san = f"log_path={self.dir}/sanitizer:print_stacktrace=1"
         env["ASAN_OPTIONS"] = san + ":detect_leaks=0"
-        env["UBSAN_OPTIONS"] = san
+        env["UBSAN_OPTIONS"] = f"{san}:suppressions={UBSAN_SUPP}"
         check = subprocess.run([*cmd, "-t"], capture_output=True, text=True, env=env)
         if check.returncode != 0:
             raise RuntimeError(f"nginx config test failed:\n{check.stderr}")

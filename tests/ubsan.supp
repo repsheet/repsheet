@@ -1,0 +1,6 @@
+# UBSan reports in third-party code that are known and harmless. Every other
+# report fails the test run, so keep entries as narrow as possible.
+
+# nginx debug logging copies zero bytes from a NULL pointer (%V of an empty
+# ngx_str_t) while parsing the request line. Entirely inside nginx core.
+nonnull-attribute:ngx_sprintf_str

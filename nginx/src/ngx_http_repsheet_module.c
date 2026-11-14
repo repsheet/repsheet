@@ -339,7 +339,8 @@ ngx_http_repsheet_variable(ngx_http_request_t *r, ngx_http_variable_value_t *vv,
         }
     }
 
-    vv->data = value.data;
+    /* nginx copies variable values with memcpy(), which must not get NULL */
+    vv->data = value.data ? value.data : (u_char *) "";
     vv->len = value.len;
     vv->valid = 1;
     vv->no_cacheable = 0;

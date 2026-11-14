@@ -16,15 +16,21 @@ endif
 
 OBJS = src/repsheet.o ../common/repsheet_actor.o
 
+# Rebuild everything when switching between sanitized and normal builds, so
+# a sanitized repsheet.so is never left behind for a non-ASan server.
+FLAVOR := $(if $(filter 1,$(SANITIZE)),sanitize,normal)
+$(shell echo $(FLAVOR) | cmp -s - .flavor || echo $(FLAVOR) > .flavor)
+
 all: repsheet.so
 
 repsheet.so: $(OBJS)
 	$(CC) -o $@ $(OBJS) $(SHOBJ_LDFLAGS) $(LDFLAGS)
 
+$(OBJS): .flavor
 src/repsheet.o: src/repsheet.c include/redismodule.h ../common/repsheet_actor.h
 ../common/repsheet_actor.o: ../common/repsheet_actor.c ../common/repsheet_actor.h
 
 clean:
-	rm -f repsheet.so $(OBJS)
+	rm -f repsheet.so $(OBJS) .flavor
 
 .PHONY: all clean

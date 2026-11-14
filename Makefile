@@ -23,13 +23,11 @@ test-nginx: module
 
 # Full suite with ASan/UBSan on the module, Valkey and nginx.
 sanitize:
-	$(MAKE) -C redis clean
 	$(MAKE) -C redis SANITIZE=1
 	script/bootstrap asan
-	cd tests && SANITIZE=1 uv run pytest
-	$(MAKE) -C redis clean
-	$(MAKE) -C redis
-	script/bootstrap nginx
+	# Restore the normal nginx build even when the tests fail.
+	cd tests && SANITIZE=1 uv run pytest; status=$$?; \
+	  cd .. && script/bootstrap nginx >/dev/null && exit $$status
 
 format:
 	clang-format -i common/*.c common/*.h redis/src/*.c
