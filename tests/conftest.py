@@ -10,16 +10,19 @@ Binaries are taken from .deps/ (built by script/bootstrap) unless overridden:
 """
 
 import os
+import ipaddress
 import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
 import pytest
 import redis
 import requests
+from dnslib import AAAA, PTR, QTYPE, RCODE, RR, A, DNSRecord
 
 ROOT = Path(__file__).resolve().parent.parent
 DEPS = ROOT / ".deps"
@@ -315,3 +318,126 @@ def admin_factory(server, r, tmp_path):
 @pytest.fixture
 def admin(admin_factory):
     return admin_factory()
+
+
+# --------------------------------------------------------------------------
+# fake DNS (bot verifier)
+# --------------------------------------------------------------------------
+
+
+class FakeDNS:
+    """A UDP DNS server answering PTR, A and AAAA from dictionaries.
+
+    ptr:       address -> hostname
+    addrs:     hostname -> [addresses] (A and AAAA)
+    servfail:  names answered with SERVFAIL
+    silent:    names never answered (timeouts)
+    delay:     seconds to wait before answering anything
+    queries:   every (name, type) received
+    """
+
+    def __init__(self):
+        self.ptr = {}
+        self.addrs = {}
+        self.servfail = set()
+        self.silent = set()
+        self.delay = 0.0
+        self.queries = []
+        self.lock = threading.Lock()
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(("127.0.0.1", 0))
+        self.port = self.sock.getsockname()[1]
+        self.running = True
+        self.thread = threading.Thread(target=self.serve, daemon=True)
+        self.thread.start()
+
+    @staticmethod
+    def reverse_name(addr):
+        return ipaddress.ip_address(addr).reverse_pointer + "."
+
+    @staticmethod
+    def norm(name):
+        name = name.lower()
+        return name if name.endswith(".") else name + "."
+
+    def record(self, addr, host, forward=None):
+        """addr's PTR is host; host resolves to forward (default: [addr])."""
+        self.ptr[addr] = host
+        self.addrs[self.norm(host)] = list(forward if forward is not None else [addr])
+
+    def queries_for(self, *names):
+        wanted = {self.norm(n) for n in names}
+        with self.lock:
+            return [q for q in self.queries if q[0] in wanted]
+
+    def reverse_queries(self, addr):
+        return self.queries_for(self.reverse_name(addr))
+
+    def answer(self, request):
+        q = request.q
+        name = self.norm(str(q.qname))
+        qtype = QTYPE[q.qtype]
+        reply = request.reply()
+        if name in self.servfail:
+            reply.header.rcode = RCODE.SERVFAIL
+            return reply
+        if qtype == "PTR":
+            for addr, host in self.ptr.items():
+                if self.reverse_name(addr) == name:
+                    reply.add_answer(RR(q.qname, QTYPE.PTR, rdata=PTR(host), ttl=60))
+                    return reply
+            reply.header.rcode = RCODE.NXDOMAIN
+            return reply
+        if qtype in ("A", "AAAA"):
+            if name not in self.addrs:
+                reply.header.rcode = RCODE.NXDOMAIN
+                return reply
+            for addr in self.addrs[name]:
+                ip = ipaddress.ip_address(addr)
+                if qtype == "A" and ip.version == 4:
+                    reply.add_answer(RR(q.qname, QTYPE.A, rdata=A(addr), ttl=60))
+                if qtype == "AAAA" and ip.version == 6:
+                    reply.add_answer(RR(q.qname, QTYPE.AAAA, rdata=AAAA(addr), ttl=60))
+            return reply
+        reply.header.rcode = RCODE.NOTIMP
+        return reply
+
+    def serve(self):
+        self.sock.settimeout(0.2)
+        while self.running:
+            try:
+                data, peer = self.sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            try:
+                request = DNSRecord.parse(data)
+            except Exception:  # noqa: BLE001
+                continue
+            name = self.norm(str(request.q.qname))
+            with self.lock:
+                self.queries.append((name, QTYPE[request.q.qtype]))
+            if name in self.silent:
+                continue
+            if self.delay:
+                threading.Timer(self.delay, self.send, (request, peer)).start()
+            else:
+                self.send(request, peer)
+
+    def send(self, request, peer):
+        try:
+            self.sock.sendto(self.answer(request).pack(), peer)
+        except OSError:
+            pass
+
+    def stop(self):
+        self.running = False
+        self.sock.close()
+
+
+@pytest.fixture
+def dns():
+    d = FakeDNS()
+    yield d
+    d.stop()

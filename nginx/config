@@ -24,12 +24,23 @@ END
 fi
 
 ngx_module_type=HTTP
-ngx_module_name=ngx_http_repsheet_module
+# One addon, two module objects: the repsheet module and its bot verifier
+# detector (which is off unless repsheet_bot_verifier is on).
+ngx_module_name="ngx_http_repsheet_module ngx_http_repsheet_bot_verifier_module"
 ngx_module_incs="$ngx_addon_dir/src $REPSHEET_COMMON"
-ngx_module_deps="$ngx_addon_dir/src/ngx_http_repsheet_module.h $ngx_addon_dir/src/ngx_http_repsheet_public.h $REPSHEET_COMMON/repsheet_actor.h"
+ngx_module_deps="$ngx_addon_dir/src/ngx_http_repsheet_module.h \
+                 $ngx_addon_dir/src/ngx_http_repsheet_public.h \
+                 $ngx_addon_dir/src/ngx_http_repsheet_redis.h \
+                 $ngx_addon_dir/src/bot_verifier/ngx_http_repsheet_bv.h \
+                 $REPSHEET_COMMON/repsheet_actor.h"
 ngx_module_srcs="$ngx_addon_dir/src/ngx_http_repsheet_module.c \
                  $ngx_addon_dir/src/ngx_http_repsheet_store.c \
                  $ngx_addon_dir/src/ngx_http_repsheet_sync.c \
+                 $ngx_addon_dir/src/ngx_http_repsheet_redis.c \
+                 $ngx_addon_dir/src/bot_verifier/ngx_http_repsheet_bv_module.c \
+                 $ngx_addon_dir/src/bot_verifier/ngx_http_repsheet_bv_providers.c \
+                 $ngx_addon_dir/src/bot_verifier/ngx_http_repsheet_bv_cache.c \
+                 $ngx_addon_dir/src/bot_verifier/ngx_http_repsheet_bv_verify.c \
                  $REPSHEET_COMMON/repsheet_actor.c"
 ngx_module_libs="-lhiredis"
 

@@ -6,6 +6,7 @@ dependencies = [
   "pytest>=8",
   "redis>=5",
   "requests>=2.32",
+  "dnslib>=0.9",
 ]
 
 [tool.pytest.ini_options]

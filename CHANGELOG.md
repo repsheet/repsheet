@@ -26,6 +26,15 @@ repository. History from both is preserved.
   `REPSHEET.CHANGES`; `REASON` and `TTL` options.
 - Valkey (≥ 7.2) and Redis (≥ 7.2) support, Unix sockets, `AUTH`, and syncing
   from replicas.
+- Detectors. **Active detectors** run inside the nginx module and record
+  decisions in real time; **passive detectors** run out of band and write
+  decisions with the REPSHEET.* commands (contract in `detectors/`).
+- The bot verifier, the first active detector (formerly
+  repsheet/ngx_bot_verifier, history merged): verifies clients that claim to
+  be search engine crawlers by published IP ranges or reverse + forward DNS,
+  using nginx's asynchronous resolver, and records a `block` (or `mark`)
+  decision `BY bot_verifier` for those that fail. `repsheet_bot_verifier*`
+  directives, `$repsheet_bot_verifier_*` variables and metrics.
 - `repsheet-admin`, a web UI (Rust) to look up actors, list, add, change and
   clear decisions, and browse the change log. Replaces the archived
   `repsheet/visualizer`.

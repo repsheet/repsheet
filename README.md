@@ -1,10 +1,22 @@
 # Repsheet
 
-Repsheet enforces reputation decisions at the edge. You decide, somewhere
-else and by whatever means you like, that an actor (an IP address, a
-network, a session, an API key) should be **blocked**, **allowed**, or
-**marked**. Repsheet makes nginx act on that decision on every request, in
-memory, without a network round trip.
+Repsheet enforces reputation decisions at the edge. An actor (an IP
+address, a network, a session, an API key) is **blocked**, **allowed**, or
+**marked**, and nginx acts on that decision on every request, in memory,
+without a network round trip.
+
+Decisions come from **detectors** and from people:
+
+* **Active detectors** run inside nginx, in real time. The first is the
+  [bot verifier](#bot-verifier), which catches clients pretending to be
+  search engine crawlers.
+* **Passive detectors** run out of band, on logs or other signals, and write
+  decisions into Valkey. Anything that can send a Redis command can be one:
+  your SIEM, a WAF, a script, a log pipeline.
+* **People**, through the [admin UI](#admin-ui) or `valkey-cli`.
+
+See [detectors/](detectors/README.md) for how the two kinds work and the
+contract for writing a passive detector.
 
 ```
  analysis / SIEM / WAF / scripts / humans
@@ -33,9 +45,10 @@ The repository contains three components:
 | Directory | What it is |
 |-----------|------------|
 | `redis/`  | A module for Valkey (≥ 7.2) and Redis (≥ 7.2). It is the source of truth: it validates and canonicalizes actors, stores decisions with optional TTLs, and keeps an ordered change log. |
-| `nginx/`  | An nginx module. It holds a full copy of the decisions in shared memory and evaluates every request against it. |
+| `nginx/`  | An nginx module. It holds a full copy of the decisions in shared memory, evaluates every request against it, and runs the active detectors (`nginx/src/bot_verifier/`). |
 | `admin/`  | `repsheet-admin`, a web UI for viewing and managing decisions (Rust). |
 | `common/` | Actor parsing and canonicalization shared by all three. |
+| `detectors/` | How detectors work; the passive detector contract. |
 
 The nginx module never queries Redis while handling a request. One worker
 keeps the shared memory store in sync:
@@ -209,6 +222,91 @@ Things to know:
 | `repsheet_sync_last_success_timestamp_seconds`, `repsheet_sync_seq` | Sync position. |
 | `repsheet_sync_snapshots_total`, `repsheet_sync_changes_total`, `repsheet_sync_errors_total` | Sync activity. |
 | `repsheet_zone_size_bytes`, `repsheet_zone_free_bytes`, `repsheet_zone_alloc_failures_total` | Shared memory. |
+| `repsheet_detector_decisions_total`, `repsheet_detector_redis_errors_total` | Decisions recorded by active detectors, and failed detector reads/writes. |
+| `repsheet_bot_verifier_*` | With the bot verifier on; see below. |
+
+## Bot verifier
+
+An active detector for clients that claim to be a search engine crawler.
+Sites relax their defenses for Googlebot, Bingbot and friends, and
+"Googlebot" is one of the most common disguises for scrapers. The search
+engines document how to tell the real ones apart, and the bot verifier does
+it for every request whose `User-Agent` makes the claim:
+
+1. If the provider publishes its crawlers' IP ranges and the client is in
+   them, it is verified.
+2. Otherwise a **reverse DNS** lookup of the client address must return a
+   name under one of the provider's domains (`crawl-66-249-66-1.googlebot.com`),
+   and a **forward lookup** of that name must return the client address.
+
+A failed verification becomes a Repsheet decision for the address: `block`
+for an hour by default, `BY bot_verifier`, with the reason
+(`bot_verifier: claimed google: no reverse DNS`). It applies to this nginx
+at once and to every nginx after the next sync, for all requests from that
+address. Requests that make no claim are never looked up.
+
+```nginx
+http {
+    repsheet_redis 10.0.0.5:6379;
+    repsheet on;
+
+    resolver 1.1.1.1 8.8.8.8 valid=300s;    # required: used for the lookups
+    resolver_timeout 5s;
+    repsheet_bot_verifier on;
+    # repsheet_bot_verifier_action mark 1h;  # gentler than block
+    repsheet_bot_verifier_ranges google /etc/nginx/bot_ranges/google-common-crawlers.json;
+    repsheet_bot_verifier_ranges bing   /etc/nginx/bot_ranges/bingbot.json;
+}
+```
+
+Lookups use nginx's own asynchronous resolver, so a slow DNS server never
+stalls other requests; concurrent requests for the same address share one
+lookup. Results are cached in shared memory and in Valkey
+(`{repsheet}:bot_verifier:<address>`), so a fleet verifies each address once.
+
+| Directive | Context | Default | |
+|-----------|---------|---------|---|
+| `repsheet_bot_verifier on \| off \| monitor` | http, server, location | `off` | `monitor` verifies and logs but records nothing. Runs only where `repsheet` is `on` or `monitor`. |
+| `repsheet_bot_verifier_action block \| mark [ttl]` | http | `block 1h` | The decision recorded for a failed verification. |
+| `repsheet_bot_verifier_timeout <time>` | http, server, location | `5s` | Timeout for each DNS query. |
+| `repsheet_bot_verifier_ttl <verified> [<failed> [<unknown>]]` | http | `24h 1h 1m` | How long verification results are cached (separate from the decision's TTL). |
+| `repsheet_bot_verifier_cache_timeout <time>` | http | `100ms` | How long a request waits for the shared Valkey cache before going to DNS. |
+| `repsheet_bot_verifier_zone_size <size>` | http | `16m` | Shared memory for cached results (128 bytes each, LRU). |
+| `repsheet_bot_verifier_provider <name> { ... }` | http | built-in set | Add a provider or replace a built-in one: `user_agent <regex>; domain <name>...; ranges <file>...;` |
+| `repsheet_bot_verifier_ranges <provider> <file>...` | http | | Published IP ranges (the providers' JSON or plain text). `script/fetch-ranges` downloads them. |
+
+It needs `repsheet_redis` (decisions are recorded there; point it at a
+writable primary) and a `resolver`. nginx refuses to start without them.
+
+Built-in providers: Google (googlebot.com, google.com,
+googleusercontent.com), Bing (search.msn.com), Apple (applebot.apple.com),
+Yandex (yandex.ru, .net, .com), Baidu (baidu.com, baidu.jp), Yahoo
+(crawl.yahoo.net) and DuckDuckGo (published ranges only). A name matches a
+domain if it equals it or ends in `.` plus the domain, so
+`evilgooglebot.com` and `googlebot.com.evil.net` do not match
+`googlebot.com`. Baidu and Yahoo domains come from consistent secondary
+sources; the providers' own pages could not be checked.
+
+| Result | When | Effect |
+|--------|------|--------|
+| `verified` | In the published ranges, or reverse and forward DNS agree | none |
+| `failed` | No reverse DNS, a name outside the provider's domains, a name that does not resolve back, or outside the ranges of a ranges-only provider | decision recorded |
+| `unknown` | DNS error or timeout | none (fails open; retried after `1m`) |
+
+A verified crawler is not written as an `allow`: an allow would override
+every block. An address verified as one crawler that claims to be another
+fails. With `block`, one fake crawler User-Agent behind a shared NAT blocks
+that address for the decision's TTL; `mark` with `limit_req` is the gentler
+choice.
+
+Variables: `$repsheet_bot_verifier_result` (`verified`, `failed`,
+`unknown`, or empty), `$repsheet_bot_verifier_provider`, and
+`$repsheet_bot_verifier_time` (seconds the request waited for verification;
+`0.000` when cached). Metrics: `repsheet_bot_verifier_requests_total{result}`,
+`_answers_total{source}`, `_decisions_total`, `_dns_queries_total`,
+`_dns_errors_total`, `_lookup_duration_seconds{source}` (histogram),
+`_cache_entries`, `_cache_evictions_total`, `_zone_size_bytes`,
+`_zone_free_bytes`.
 
 ## Admin UI
 

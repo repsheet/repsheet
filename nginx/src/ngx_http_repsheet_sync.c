@@ -13,19 +13,11 @@
  * Requests never wait on Redis. If Redis is unavailable the store keeps
  * serving the last known decisions and the loop reconnects with backoff.
  */
-#include "ngx_http_repsheet_module.h"
-
-#include <hiredis/hiredis.h>
-#include <hiredis/async.h>
+#include "ngx_http_repsheet_redis.h"
 
 #define CHANGES_PAGE 1000
 #define EXPIRE_EVERY 10000      /* ms between sweeps of expired entries */
 #define MAX_BACKOFF 30000
-
-typedef struct {
-    ngx_connection_t       *conn;
-    redisAsyncContext      *ac;
-} adapter_t;
 
 typedef struct {
     ngx_http_repsheet_main_conf_t  *conf;
@@ -45,122 +37,6 @@ typedef struct {
 } sync_t;
 
 static sync_t  sync_state;
-
-
-/* ------------------------------------------------------------------------ */
-/* hiredis <-> nginx event loop adapter                                      */
-/* ------------------------------------------------------------------------ */
-
-static void
-adapter_read(ngx_event_t *ev)
-{
-    ngx_connection_t *c = ev->data;
-    redisAsyncHandleRead(c->data);
-}
-
-
-static void
-adapter_write(ngx_event_t *ev)
-{
-    ngx_connection_t *c = ev->data;
-    redisAsyncHandleWrite(c->data);
-}
-
-
-static void
-adapter_add_read(void *privdata)
-{
-    adapter_t *a = privdata;
-    if (!a->conn->read->active) {
-        ngx_add_event(a->conn->read, NGX_READ_EVENT, NGX_LEVEL_EVENT);
-    }
-}
-
-
-static void
-adapter_del_read(void *privdata)
-{
-    adapter_t *a = privdata;
-    if (a->conn->read->active) {
-        ngx_del_event(a->conn->read, NGX_READ_EVENT, 0);
-    }
-}
-
-
-static void
-adapter_add_write(void *privdata)
-{
-    adapter_t *a = privdata;
-    if (!a->conn->write->active) {
-        ngx_add_event(a->conn->write, NGX_WRITE_EVENT, NGX_LEVEL_EVENT);
-    }
-}
-
-
-static void
-adapter_del_write(void *privdata)
-{
-    adapter_t *a = privdata;
-    if (a->conn->write->active) {
-        ngx_del_event(a->conn->write, NGX_WRITE_EVENT, 0);
-    }
-}
-
-
-/* Called by hiredis before it closes the socket. */
-static void
-adapter_cleanup(void *privdata)
-{
-    adapter_t *a = privdata;
-
-    adapter_del_read(a);
-    adapter_del_write(a);
-    if (a->conn->read->posted) {
-        ngx_delete_posted_event(a->conn->read);
-    }
-    if (a->conn->write->posted) {
-        ngx_delete_posted_event(a->conn->write);
-    }
-    a->conn->fd = (ngx_socket_t) -1;
-    ngx_free_connection(a->conn);
-    ngx_free(a);
-}
-
-
-static ngx_int_t
-adapter_attach(redisAsyncContext *ac, ngx_log_t *log)
-{
-    adapter_t         *a;
-    ngx_connection_t  *c;
-
-    a = ngx_alloc(sizeof(adapter_t), log);
-    if (a == NULL) {
-        return NGX_ERROR;
-    }
-
-    c = ngx_get_connection(ac->c.fd, log);
-    if (c == NULL) {
-        ngx_free(a);
-        return NGX_ERROR;
-    }
-
-    c->data = ac;
-    c->read->handler = adapter_read;
-    c->write->handler = adapter_write;
-    c->read->log = log;
-    c->write->log = log;
-
-    a->conn = c;
-    a->ac = ac;
-
-    ac->ev.data = a;
-    ac->ev.addRead = adapter_add_read;
-    ac->ev.delRead = adapter_del_read;
-    ac->ev.addWrite = adapter_add_write;
-    ac->ev.delWrite = adapter_del_write;
-    ac->ev.cleanup = adapter_cleanup;
-    return NGX_OK;
-}
 
 
 /* ------------------------------------------------------------------------ */
@@ -522,51 +398,8 @@ on_connect(const redisAsyncContext *ac, int status)
 static redisAsyncContext *
 connect_one(void)
 {
-    ngx_http_repsheet_main_conf_t  *conf = sync_state.conf;
-    redisAsyncContext              *ac;
-    redisOptions                    options = {0};
-    u_char                          host[NGX_MAXHOSTNAMELEN + 1];
-    u_char                          path[NGX_MAX_PATH + 1];
-
-    if (conf->redis.unix_path.len) {
-        ngx_cpystrn(path, conf->redis.unix_path.data, ngx_min(conf->redis.unix_path.len + 1, sizeof(path)));
-        REDIS_OPTIONS_SET_UNIX(&options, (char *) path);
-    } else {
-        ngx_cpystrn(host, conf->redis.host.data, ngx_min(conf->redis.host.len + 1, sizeof(host)));
-        REDIS_OPTIONS_SET_TCP(&options, (char *) host, (int) conf->redis.port);
-    }
-
-    ac = redisAsyncConnectWithOptions(&options);
-    if (ac == NULL) {
-        return NULL;
-    }
-
-    if (ac->err) {
-        ngx_log_error(NGX_LOG_ERR, sync_state.log, 0, "repsheet: could not connect to redis: %s",
-                      ac->errstr);
-        redisAsyncFree(ac);
-        return NULL;
-    }
-
-    if (adapter_attach(ac, sync_state.log) != NGX_OK) {
-        redisAsyncFree(ac);
-        return NULL;
-    }
-
-    redisAsyncSetConnectCallback(ac, on_connect);
-    redisAsyncSetDisconnectCallback(ac, on_disconnect);
-
-    if (conf->redis.password.len) {
-        if (conf->redis.user.len) {
-            redisAsyncCommand(ac, on_auth, NULL, "AUTH %b %b", conf->redis.user.data, conf->redis.user.len,
-                              conf->redis.password.data, conf->redis.password.len);
-        } else {
-            redisAsyncCommand(ac, on_auth, NULL, "AUTH %b", conf->redis.password.data,
-                              conf->redis.password.len);
-        }
-    }
-
-    return ac;
+    return ngx_http_repsheet_redis_connect(sync_state.conf, sync_state.log, on_connect, on_disconnect,
+                                           on_auth);
 }
 
 

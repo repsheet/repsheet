@@ -6,6 +6,8 @@
  * never blocks on the network.
  */
 #include "ngx_http_repsheet_module.h"
+#include "ngx_http_repsheet_redis.h"
+#include "bot_verifier/ngx_http_repsheet_bv.h"
 
 #define DEFAULT_ZONE_SIZE (32 * 1024 * 1024)
 
@@ -280,8 +282,20 @@ ngx_http_repsheet_handler(ngx_http_request_t *r)
 
     store = mcf->zone->data;
 
+    /*
+     * Active detectors run for requests that are neither trusted (allow) nor
+     * already rejected (block). They may add a decision to `v`, or suspend
+     * the request while they work (this handler then runs again).
+     */
+    if (v->status == RS_STATUS_NONE || v->status == RS_STATUS_MARK) {
+        if (ngx_http_repsheet_bot_verifier_check(r, v) == NGX_AGAIN) {
+            return NGX_AGAIN;
+        }
+    }
+
     /* Count each client request once, not again after internal redirects. */
-    if (!r->internal) {
+    if (!r->internal && !v->counted) {
+        v->counted = 1;
         (void) ngx_atomic_fetch_add(&store->sh->counters.requests[v->status], 1);
     }
 
@@ -300,7 +314,8 @@ ngx_http_repsheet_handler(ngx_http_request_t *r)
                   "repsheet: blocked request, actor \"%V\", reason \"%V\"",
                   &v->actor, &v->reason);
 
-    if (!r->internal) {
+    if (!r->internal && v->counted == 1) {
+        v->counted = 2;
         (void) ngx_atomic_fetch_add(&store->sh->counters.blocked, 1);
     }
 
@@ -469,20 +484,33 @@ ngx_http_repsheet_metrics_handler(ngx_http_request_t *r)
         mcf->zone->shm.size,
         (size_t) store->shpool->pfree * ngx_pagesize);
 
+    b->last = ngx_snprintf(b->last, b->end - b->last,
+        "# HELP repsheet_detector_decisions_total Decisions recorded by active detectors.\n"
+        "# TYPE repsheet_detector_decisions_total counter\n"
+        "repsheet_detector_decisions_total %uA\n"
+        "# HELP repsheet_detector_redis_errors_total Detector reads and writes that failed.\n"
+        "# TYPE repsheet_detector_redis_errors_total counter\n"
+        "repsheet_detector_redis_errors_total %uA\n",
+        sh->counters.detector_decisions, sh->counters.detector_redis_errors);
+
     r->headers_out.status = NGX_HTTP_OK;
     r->headers_out.content_length_n = b->last - b->pos;
     ngx_str_set(&r->headers_out.content_type, "text/plain; version=0.0.4");
     r->headers_out.content_type_len = r->headers_out.content_type.len;
 
+    out.buf = b;
+    out.next = ngx_http_repsheet_bot_verifier_metrics(r);
+    if (out.next) {
+        r->headers_out.content_length_n += out.next->buf->last - out.next->buf->pos;
+        b = out.next->buf;
+    }
+    b->last_buf = (r == r->main) ? 1 : 0;
+    b->last_in_chain = 1;
+
     rc = ngx_http_send_header(r);
     if (rc == NGX_ERROR || rc > NGX_OK || r->header_only) {
         return rc;
     }
-
-    b->last_buf = (r == r->main) ? 1 : 0;
-    b->last_in_chain = 1;
-    out.buf = b;
-    out.next = NULL;
 
     return ngx_http_output_filter(r, &out);
 }
@@ -731,6 +759,9 @@ ngx_http_repsheet_init(ngx_conf_t *cf)
 static ngx_int_t
 ngx_http_repsheet_init_process(ngx_cycle_t *cycle)
 {
+    if (ngx_http_repsheet_client_init_process(cycle) != NGX_OK) {
+        return NGX_ERROR;
+    }
     return ngx_http_repsheet_sync_init_process(cycle);
 }
 
@@ -739,4 +770,5 @@ static void
 ngx_http_repsheet_exit_process(ngx_cycle_t *cycle)
 {
     ngx_http_repsheet_sync_exit_process(cycle);
+    ngx_http_repsheet_client_exit_process();
 }

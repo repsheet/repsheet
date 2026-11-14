@@ -20,6 +20,8 @@ typedef struct {
     ngx_atomic_t changes;
     ngx_atomic_t sync_errors;
     ngx_atomic_t alloc_failures;
+    ngx_atomic_t detector_decisions;            /* recorded by active detectors */
+    ngx_atomic_t detector_redis_errors;
 } ngx_http_repsheet_counters_t;
 
 typedef struct {
@@ -53,6 +55,7 @@ typedef struct {
     ngx_msec_t                   interval;
     size_t                       zone_size;
     ngx_shm_zone_t              *zone;
+    ngx_flag_t                   detectors;     /* an active detector is enabled */
 } ngx_http_repsheet_main_conf_t;
 
 typedef struct {
@@ -70,6 +73,7 @@ typedef struct {
     rs_status_t                  status;
     ngx_str_t                    reason;
     ngx_str_t                    actor;
+    ngx_flag_t                   counted;       /* in repsheet_requests_total */
 } ngx_http_repsheet_verdict_t;
 
 extern ngx_module_t ngx_http_repsheet_module;
@@ -87,6 +91,10 @@ void ngx_http_repsheet_store_delete(ngx_http_repsheet_store_t *store, ngx_str_t 
 uint64_t ngx_http_repsheet_store_begin_snapshot(ngx_http_repsheet_store_t *store);
 void ngx_http_repsheet_store_end_snapshot(ngx_http_repsheet_store_t *store, uint64_t generation);
 void ngx_http_repsheet_store_expire(ngx_http_repsheet_store_t *store);
+
+/* redis.c: record an active detector's decision (local store + Valkey) */
+ngx_int_t ngx_http_repsheet_record(ngx_str_t *actor, rs_status_t status, ngx_str_t *reason, time_t ttl,
+    const char *by, ngx_log_t *log);
 
 /* sync.c */
 ngx_int_t ngx_http_repsheet_sync_init_process(ngx_cycle_t *cycle);

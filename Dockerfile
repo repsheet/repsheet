@@ -44,9 +44,14 @@ RUN cd "nginx-${NGINX_VERSION}" \
          --add-dynamic-module=/src/nginx \
     && make modules
 
+COPY script/fetch-ranges /build/fetch-ranges
+# Crawler IP ranges for the bot verifier, as of the image build; refresh them in production.
+RUN /build/fetch-ranges /build/bot_ranges
+
 FROM nginx:${NGINX_VERSION} AS nginx
 ARG NGINX_VERSION
 COPY --from=nginx-build /build/nginx-${NGINX_VERSION}/objs/ngx_http_repsheet_module.so /etc/nginx/modules/
+COPY --from=nginx-build /build/bot_ranges /etc/nginx/bot_ranges
 RUN sed -i '1i load_module modules/ngx_http_repsheet_module.so;' /etc/nginx/nginx.conf
 
 # --------------------------------------------------------------------------
