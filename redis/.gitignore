@@ -1,0 +1,8 @@
+*.o
+*.a
+*.so
+*.db
+rmutil/test_vector
+dump.rdb
+venv
+__pycache__
