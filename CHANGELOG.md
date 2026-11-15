@@ -35,6 +35,9 @@ repository. History from both is preserved.
   using nginx's asynchronous resolver, and records a `block` (or `mark`)
   decision `BY bot_verifier` for those that fail. `repsheet_bot_verifier*`
   directives, `$repsheet_bot_verifier_*` variables and metrics.
+- Network lookups check a 16,384-bit filter per prefix length before the
+  store, so lengths with no matching network cost ~15 ns instead of ~85 ns.
+  Decisions at every IPv4 and IPv6 length: +11.69 -> +1.16 µs per request.
 - The bot verifier matches all providers' User-Agent patterns as one
   JIT-compiled PCRE2 pattern, once per request: its cost for ordinary
   traffic fell from 2.10 µs to 0.37 µs per request.

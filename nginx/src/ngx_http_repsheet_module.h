@@ -32,6 +32,10 @@ typedef struct {
     ngx_uint_t                   count;
     uint32_t                     v4_prefixes[33];
     uint32_t                     v6_prefixes[129];
+    /* Per prefix length, a bitmap of hashed networks with decisions; see store.c. */
+    u_char                      *filters;
+    ngx_uint_t                   ip_entries;
+    ngx_uint_t                   filter_stale;  /* IP entries removed since the last rebuild */
     uint64_t                     generation;
 
     /* Sync state, owned by one worker at a time. */

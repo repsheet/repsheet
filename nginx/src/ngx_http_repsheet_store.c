@@ -8,10 +8,22 @@
  *
  * Network matching does not need a trie: the store tracks how many entries
  * exist for each prefix length, and a lookup masks the client address to
- * each prefix length in use and probes the tree. Real deployments use a
- * handful of distinct prefix lengths, so this is a few hash lookups.
+ * each prefix length in use and probes the tree.
+ *
+ * Most of those probes miss, and a tree probe costs ~15 scattered memory
+ * reads, so each prefix length also has a 16,384-bit filter: a decision sets
+ * the bit for a hash of its network, and a lookup only probes the tree when
+ * the bit for the client's masked address is set. A set bit can be stale or
+ * shared (the tree has the final say); a clear bit is always right. Removed
+ * decisions leave their bits until the filters are rebuilt, after every
+ * snapshot and in the expiry sweep once enough have gone.
  */
 #include "ngx_http_repsheet_module.h"
+
+#define FILTER_BITS_LOG 14
+#define FILTER_BYTES (1 << (FILTER_BITS_LOG - 3))
+#define FILTER_SLOTS (33 + 129)     /* IPv4 /0-/32, IPv6 /0-/128 */
+#define FILTER_REBUILD_MIN 1024
 
 typedef struct {
     ngx_str_node_t   sn;
@@ -60,6 +72,9 @@ ngx_http_repsheet_store_init_zone(ngx_shm_zone_t *zone, void *data)
     ngx_rbtree_init(&sh->rbtree, &sh->sentinel, ngx_str_rbtree_insert_value);
     ngx_queue_init(&sh->entries);
 
+    /* ~324 KB. Without it (a very small zone) lookups just probe the tree. */
+    sh->filters = ngx_slab_calloc(shpool, FILTER_SLOTS * FILTER_BYTES);
+
     shpool->data = sh;
     shpool->log_nomem = 0;
 
@@ -82,6 +97,80 @@ prefix_counter(ngx_http_repsheet_shctx_t *sh, ngx_http_repsheet_entry_t *e)
 }
 
 
+/* The filter bit of a masked network: Fibonacci hashing of its address. */
+static ngx_inline u_char *
+filter_byte(ngx_http_repsheet_shctx_t *sh, const rs_ip_t *net, u_char *mask)
+{
+    const uint8_t  *a = net->addr;
+    uint64_t        h, hi, lo;
+    ngx_uint_t      bit, slot;
+
+    if (net->family == 4) {
+        h = (uint64_t) (((uint32_t) a[0] << 24) | ((uint32_t) a[1] << 16) | ((uint32_t) a[2] << 8) | a[3])
+            * 0x9e3779b97f4a7c15ULL;
+        slot = net->prefix;
+    } else {
+        hi = ((uint64_t) a[0] << 56) | ((uint64_t) a[1] << 48) | ((uint64_t) a[2] << 40) | ((uint64_t) a[3] << 32)
+             | ((uint64_t) a[4] << 24) | ((uint64_t) a[5] << 16) | ((uint64_t) a[6] << 8) | a[7];
+        lo = ((uint64_t) a[8] << 56) | ((uint64_t) a[9] << 48) | ((uint64_t) a[10] << 40) | ((uint64_t) a[11] << 32)
+             | ((uint64_t) a[12] << 24) | ((uint64_t) a[13] << 16) | ((uint64_t) a[14] << 8) | a[15];
+        h = (hi * 0x9e3779b97f4a7c15ULL) ^ (lo * 0xc2b2ae3d27d4eb4fULL);
+        h = (h ^ (h >> 29)) * 0xbf58476d1ce4e5b9ULL;
+        slot = 33 + net->prefix;
+    }
+
+    bit = (ngx_uint_t) (h >> (64 - FILTER_BITS_LOG));
+    *mask = (u_char) (1 << (bit & 7));
+    return sh->filters + slot * FILTER_BYTES + (bit >> 3);
+}
+
+
+static void
+filter_add(ngx_http_repsheet_shctx_t *sh, const rs_ip_t *net)
+{
+    u_char  mask, *b;
+
+    if (sh->filters) {
+        b = filter_byte(sh, net, &mask);
+        *b |= mask;
+    }
+}
+
+
+/* An IP entry's network, from its lookup key ('I', family, prefix, address). */
+static void
+entry_network(ngx_http_repsheet_entry_t *e, rs_ip_t *net)
+{
+    ngx_memzero(net, sizeof(rs_ip_t));
+    net->family = e->family;
+    net->prefix = e->prefix;
+    ngx_memcpy(net->addr, e->data + 3, e->family == 4 ? 4 : 16);
+}
+
+
+/* Called with the write lock held. */
+static void
+filter_rebuild(ngx_http_repsheet_shctx_t *sh)
+{
+    ngx_queue_t                *q;
+    ngx_http_repsheet_entry_t  *e;
+    rs_ip_t                     net;
+
+    if (sh->filters == NULL) {
+        return;
+    }
+    ngx_memzero(sh->filters, FILTER_SLOTS * FILTER_BYTES);
+    for (q = ngx_queue_head(&sh->entries); q != ngx_queue_sentinel(&sh->entries); q = ngx_queue_next(q)) {
+        e = ngx_queue_data(q, ngx_http_repsheet_entry_t, queue);
+        if (e->family) {
+            entry_network(e, &net);
+            filter_add(sh, &net);
+        }
+    }
+    sh->filter_stale = 0;
+}
+
+
 static void
 remove_entry(ngx_http_repsheet_store_t *store, ngx_http_repsheet_entry_t *e)
 {
@@ -89,6 +178,8 @@ remove_entry(ngx_http_repsheet_store_t *store, ngx_http_repsheet_entry_t *e)
 
     if (counter) {
         (*counter)--;
+        store->sh->ip_entries--;
+        store->sh->filter_stale++;
     }
 
     ngx_rbtree_delete(&store->sh->rbtree, &e->sn.node);
@@ -163,23 +254,32 @@ ngx_http_repsheet_store_lookup_ip(ngx_http_repsheet_store_t *store, const rs_ip_
     ngx_http_repsheet_shctx_t  *sh = store->sh;
     uint32_t                   *counts;
     int64_t                     now = ngx_http_repsheet_now_ms();
-    u_char                      key[RS_IP_KEY_MAX];
+    u_char                      key[RS_IP_KEY_MAX], mask, *b;
     size_t                      len;
-    rs_ip_t                     net;
+    rs_ip_t                     net = *ip;
     int                         prefix;
 
     counts = ip->family == 4 ? sh->v4_prefixes : sh->v6_prefixes;
 
     ngx_rwlock_rlock(&sh->lock);
 
-    /* Most specific first, so it wins ties between equal statuses. */
+    /* Most specific first, so it wins ties between equal statuses. Masking
+     * the already-masked address to a shorter prefix is the same as masking
+     * the original. */
     for (prefix = ip->prefix; prefix >= 0; prefix--) {
         if (counts[prefix] == 0) {
             continue;
         }
 
-        net = *ip;
         rs_ip_mask(&net, (uint8_t) prefix);
+
+        if (sh->filters) {
+            b = filter_byte(sh, &net, &mask);
+            if (!(*b & mask)) {
+                continue;   /* no decision for this network */
+            }
+        }
+
         len = rs_ip_key(&net, key);
         consider(find_entry(sh, key, len), now, v, pool);
     }
@@ -275,6 +375,8 @@ ngx_http_repsheet_store_set(ngx_http_repsheet_store_t *store, ngx_str_t *actor,
     counter = prefix_counter(sh, e);
     if (counter) {
         (*counter)++;
+        sh->ip_entries++;
+        filter_add(sh, &ip);
     }
 
     ngx_rwlock_unlock(&sh->lock);
@@ -343,6 +445,12 @@ sweep(ngx_http_repsheet_store_t *store, uint64_t generation, int64_t now)
         {
             remove_entry(store, e);
         }
+    }
+
+    /* Clear bits left by removed decisions: always after a snapshot, otherwise
+     * once a good share of the networks are gone. */
+    if (generation || store->sh->filter_stale > ngx_max(FILTER_REBUILD_MIN, store->sh->ip_entries / 2)) {
+        filter_rebuild(store->sh);
     }
 
     ngx_rwlock_unlock(&store->sh->lock);

@@ -69,7 +69,8 @@ known decisions and the sync loop reconnects with backoff. Decisions survive
 
 Network decisions are matched without a trie. The store counts how many
 entries exist at each prefix length, and a lookup masks the client address
-to each prefix length in use, then does a hash lookup. When several decisions
+to each prefix length in use, checks a small per-length filter, and only
+looks the network up when the filter says it might be there. When several decisions
 apply, **allow** beats **block**, which beats **mark**. Between decisions of
 equal status, the most specific one wins.
 
@@ -425,12 +426,12 @@ Results on a 16-CPU Linux machine (nginx 1.30.6, Valkey 9.1.3):
 | Scenario | nginx alone | with Repsheet | added per request |
 |----------|------------:|--------------:|------------------:|
 | empty store | 3.50 µs | 3.54 µs | +0.04 µs (noise) |
-| 10k decisions | 3.55 µs | 3.86 µs | +0.32 µs |
+| 10k decisions | 3.57 µs | 3.71 µs | +0.14 µs |
 | 100k decisions | 3.50 µs | 3.93 µs | +0.43 µs |
 | 1M decisions | 3.52 µs | 4.03 µs | +0.51 µs |
 | 100k decisions + 1,000 changes/s syncing | 3.52 µs | 3.93 µs | +0.40 µs |
 | cookie and header actors, 100k decisions | 3.58 µs | 4.35 µs | +0.78 µs |
-| decisions at every IPv4 and IPv6 prefix length | 3.61 µs | 15.31 µs | +11.69 µs |
+| decisions at every IPv4 and IPv6 prefix length | 3.69 µs | 4.85 µs | +1.16 µs |
 | bot verifier, browser traffic | 3.56 µs | 3.92 µs | +0.37 µs |
 | bot verifier, Googlebot from its ranges | 3.57 µs | 3.84 µs | +0.27 µs |
 
@@ -438,9 +439,11 @@ What this means:
 
 * **Lookups are cheap and grow slowly**: about half a microsecond at a
   million decisions, and sync churn adds nothing measurable.
-* **Network decisions cost per prefix length in use** (about 85 ns for each
-  length the client's family has decisions at). Most deployments use a
-  handful of lengths; the worst case above uses all 138.
+* **Network decisions cost a little per prefix length in use**, about 15 ns
+  for each length the client's family has decisions at: a per-length filter
+  answers most of them without touching the store. Most deployments use a
+  handful of lengths; the worst case above uses all 138. (Without the
+  filters each length cost about 85 ns, 11.7 µs in that worst case.)
 * **The bot verifier's User-Agent check runs on every request**, so all
   providers' patterns are combined into one JIT-compiled match (about 130 ns
   for a browser User-Agent), done once per request even across internal

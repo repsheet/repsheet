@@ -97,6 +97,57 @@ class TestEnforcement:
         wait_for(lambda: nginx.get("/vars").text == "mark|narrow|ip:127.0.0.0/24")
 
 
+class TestPrefixLengths:
+    """Every prefix length in use is checked; the per-length filters may only skip misses."""
+
+    def vars(self, n, ip):
+        return n.get("/vars", headers={"X-Real-IP": ip}).text
+
+    @pytest.fixture
+    def realip(self, nginx_factory, r):
+        n = nginx_factory(conf(http="set_real_ip_from 127.0.0.1;\n    real_ip_header X-Real-IP;"))
+        synced(n)
+        return n
+
+    def test_most_specific_match_at_every_length(self, realip, r):
+        pipe = r.pipeline(transaction=False)
+        for length in range(8, 33):
+            pipe.execute_command("REPSHEET.MARK", f"10.20.30.40/{length}", "REASON", f"v4/{length}")
+        for length in range(16, 129, 8):
+            pipe.execute_command("REPSHEET.MARK", f"2001:db8:aaaa:bbbb:cccc:dddd:eeee:ffff/{length}",
+                                 "REASON", f"v6/{length}")
+        pipe.execute()
+        wait_for(lambda: metrics(realip)["repsheet_decisions"] == 25 + 15, message="sync")
+        assert self.vars(realip, "10.20.30.40") == "mark|v4/32|ip:10.20.30.40"
+        assert self.vars(realip, "10.20.30.41").split("|")[1] == "v4/31"
+        assert self.vars(realip, "10.20.31.1").split("|")[1] == "v4/23"
+        assert self.vars(realip, "10.200.0.1").split("|")[1] == "v4/8"
+        assert self.vars(realip, "11.0.0.1") == "||"
+        assert self.vars(realip, "2001:db8:aaaa:bbbb:cccc:dddd:eeee:ffff").split("|")[1] == "v6/128"
+        assert self.vars(realip, "2001:db8:aaaa:bbbb:cccc:dddd:eeee:0").split("|")[1] == "v6/112"
+        assert self.vars(realip, "2001:db8:aaaa::1").split("|")[1] == "v6/48"
+        assert self.vars(realip, "2a00::1") == "||"
+
+    def test_cleared_networks_fall_back(self, realip, r):
+        r.execute_command("REPSHEET.BLOCK", "10.1.2.0/24", "REASON", "narrow")
+        r.execute_command("REPSHEET.MARK", "10.1.0.0/16", "REASON", "wide")
+        wait_status(realip, 403, headers={"X-Real-IP": "10.1.2.3"})
+        r.execute_command("REPSHEET.CLEAR", "10.1.2.0/24")   # its filter bit stays set
+        wait_for(lambda: self.vars(realip, "10.1.2.3") == "mark|wide|ip:10.1.0.0/16", message="fallback")
+
+    def test_correct_after_filters_are_rebuilt(self, realip, r):
+        """Remove enough networks to trigger a rebuild in the expiry sweep."""
+        pipe = r.pipeline(transaction=False)
+        for i in range(3000):
+            pipe.execute_command("REPSHEET.MARK", f"172.16.{i // 256}.{i % 256}/32", "TTL", "1")
+        pipe.execute_command("REPSHEET.BLOCK", "192.0.2.0/24")
+        pipe.execute()
+        wait_for(lambda: metrics(realip)["repsheet_decisions"] == 3001, message="sync")
+        wait_for(lambda: metrics(realip)["repsheet_decisions"] == 1, timeout=20, message="expiry sweep")
+        assert self.vars(realip, "192.0.2.9").startswith("block|")
+        assert self.vars(realip, "172.16.0.1") == "||"
+
+
 class TestConfiguration:
     def test_block_status(self, nginx_factory, r):
         n = nginx_factory(conf("    repsheet_block_status 429;"))
