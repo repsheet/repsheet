@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#
+# Check that a release tag matches the version in the code.
+#
+#   script/check-version v6.0.0
+#
+# The tag must be v<version> (optionally with a suffix such as -rc.1), and
+# <version> must equal REPSHEET_VERSION in redis/src/repsheet.c and the
+# version in admin/Cargo.toml and bench/Cargo.toml.
+set -euo pipefail
+
+tag="${1:?usage: script/check-version <tag>}"
+root="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [[ ! "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z.]+)?$ ]]; then
+  echo "tag \"$tag\" is not v<major>.<minor>.<patch>[-suffix]" >&2
+  exit 1
+fi
+version="${BASH_REMATCH[1]}"
+
+status=0
+check() { # what found
+  if [[ "$2" != "$version" ]]; then
+    echo "$1 is $2, tag $tag says $version" >&2
+    status=1
+  fi
+}
+check "REPSHEET_VERSION (redis/src/repsheet.c)" \
+  "$(sed -n 's/^#define REPSHEET_VERSION "\(.*\)"$/\1/p' "$root/redis/src/repsheet.c")"
+for crate in admin bench; do
+  check "$crate/Cargo.toml version" "$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/$crate/Cargo.toml" | head -1)"
+done
+
+[[ $status == 0 ]] && echo "$tag matches the version in the code ($version)"
+exit $status

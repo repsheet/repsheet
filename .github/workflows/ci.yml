@@ -5,6 +5,7 @@ on:
     branches: [main, master]
   pull_request:
   workflow_dispatch:
+  workflow_call:    # the release workflow runs the full suite first
 
 env:
   VALKEY_VERSION: "9.1.3"

@@ -149,6 +149,22 @@ CI covers Valkey 9.1 and Redis 8.10, nginx 1.30 (stable) and 1.31
 (mainline), static and dynamic builds, a sanitizer run, and the admin UI
 (rustfmt, clippy, unit and integration tests).
 
+## Releasing
+
+Set the new version in `redis/src/repsheet.c` (`REPSHEET_VERSION`),
+`admin/Cargo.toml` and `bench/Cargo.toml` (then `cargo update -w` in each),
+commit, and push a tag:
+
+```sh
+git tag -a v6.1.0 -m "Repsheet 6.1.0"
+git push origin v6.1.0
+```
+
+The release workflow checks that the tag matches the code
+(`script/check-version`), runs the full CI suite, and publishes a GitHub
+Release with notes generated from the changes since the previous release.
+A tag with a suffix (`v6.1.0-rc.1`) becomes a pre-release.
+
 ## License
 
 Apache 2.0. `redis/include/redismodule.h` is from Redis 7.2.4 (BSD 3-Clause).

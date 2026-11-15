@@ -1,0 +1,48 @@
+# Publishes a GitHub Release when a version tag is pushed:
+#
+#   git tag -a v6.0.0 -m "Repsheet 6.0.0" && git push origin v6.0.0
+#
+# The tag must match the version in the code (script/check-version) and the
+# full CI suite must pass first. Release notes are generated from the
+# changes since the previous tag; tags with a suffix (v6.1.0-rc.1) become
+# pre-releases. No binaries are attached; GitHub adds the source archives.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Tag matches the code
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: script/check-version "$GITHUB_REF_NAME"
+
+  ci:
+    name: CI
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: GitHub Release
+    needs: ci
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          args=(--verify-tag --generate-notes --title "Repsheet ${TAG#v}")
+          if [[ "$TAG" == *-* ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "$TAG" "${args[@]}"
