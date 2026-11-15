@@ -10,9 +10,15 @@ pub struct Run {
     pub seconds: f64,
     pub cpu_ns: u64,
     pub p50_us: u64,
+    #[serde(default)]
+    pub p75_us: u64,
     pub p90_us: u64,
+    #[serde(default)]
+    pub p95_us: u64,
     pub p99_us: u64,
     pub p999_us: u64,
+    #[serde(default)]
+    pub p9999_us: u64,
 }
 
 impl Run {
@@ -34,8 +40,14 @@ pub struct Side {
     pub cpu_us_per_request: f64,
     pub throughput: f64,
     pub p50_us: u64,
+    #[serde(default)]
+    pub p75_us: u64,
+    #[serde(default)]
+    pub p95_us: u64,
     pub p99_us: u64,
     pub p999_us: u64,
+    #[serde(default)]
+    pub p9999_us: u64,
 }
 
 fn median(mut v: Vec<f64>) -> f64 {
@@ -57,8 +69,11 @@ impl Side {
             cpu_us_per_request: median(runs.iter().map(Run::cpu_us_per_request).collect()),
             throughput: median(runs.iter().map(Run::throughput).collect()),
             p50_us: median(runs.iter().map(|r| r.p50_us as f64).collect()) as u64,
+            p75_us: median(runs.iter().map(|r| r.p75_us as f64).collect()) as u64,
+            p95_us: median(runs.iter().map(|r| r.p95_us as f64).collect()) as u64,
             p99_us: median(runs.iter().map(|r| r.p99_us as f64).collect()) as u64,
             p999_us: median(runs.iter().map(|r| r.p999_us as f64).collect()) as u64,
+            p9999_us: median(runs.iter().map(|r| r.p9999_us as f64).collect()) as u64,
             runs,
         }
     }
@@ -168,6 +183,47 @@ impl Report {
         out
     }
 
+    /// Client latency percentiles, baseline and Repsheet side by side.
+    pub fn latency_table(&self) -> String {
+        let mut out = format!(
+            "\nLatency in µs{}:\n{:<12} {:<9} {:>8} {:>8} {:>8} {:>8} {:>9}\n",
+            match self.settings.rate {
+                Some(r) => format!(" at a fixed {r:.0} requests/s, from when each request was due"),
+                None => " (closed loop: includes queueing at full load)".into(),
+            },
+            "scenario",
+            "",
+            "p50",
+            "p75",
+            "p95",
+            "p99",
+            "p99.99"
+        );
+        out.push_str(&format!("{}\n", "-".repeat(68)));
+        for s in &self.scenarios {
+            if s.failed.is_some() {
+                continue;
+            }
+            for (label, side) in [("baseline", &s.baseline), ("repsheet", &s.repsheet)] {
+                out.push_str(&format!(
+                    "{:<12} {:<9} {:>8} {:>8} {:>8} {:>8} {:>9}\n",
+                    if label == "baseline" {
+                        s.name.as_str()
+                    } else {
+                        ""
+                    },
+                    label,
+                    side.p50_us,
+                    side.p75_us,
+                    side.p95_us,
+                    side.p99_us,
+                    side.p9999_us
+                ));
+            }
+        }
+        out
+    }
+
     pub fn compare(&self, old: &Report) -> String {
         let mut out = format!("\nCompared with {} ({}):\n", old.created, old.host);
         out.push_str(&format!(
@@ -208,9 +264,12 @@ mod tests {
             seconds: 1.0,
             cpu_ns,
             p50_us: 1,
+            p75_us: 1,
             p90_us: 2,
+            p95_us: 2,
             p99_us: 3,
             p999_us: 4,
+            p9999_us: 5,
         }
     }
 

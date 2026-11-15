@@ -91,6 +91,23 @@ pub fn parse_response(buf: &[u8]) -> Result<Option<(u16, usize)>, String> {
     Ok((buf.len() >= total).then_some((status, total)))
 }
 
+/// Wait until `t` precisely. Tokio's timer has millisecond resolution, which
+/// would add up to 1 ms to every fixed-rate latency, so sleep only for the
+/// coarse part and yield until the exact time (this spins on the load
+/// generator's CPUs, not the server's).
+async fn wait_until(t: Instant) {
+    let now = Instant::now();
+    if t <= now {
+        return;
+    }
+    if t - now > Duration::from_millis(2) {
+        tokio::time::sleep(t - now - Duration::from_millis(2)).await;
+    }
+    while Instant::now() < t {
+        tokio::task::yield_now().await;
+    }
+}
+
 struct Shared {
     stop: AtomicBool,
     next: AtomicU64,
@@ -116,10 +133,7 @@ async fn connection(
         let intended = match interval {
             Some(iv) => {
                 let t = start + iv.mul_f64(sent as f64 + index as f64 / spec.connections as f64);
-                let now = Instant::now();
-                if t > now {
-                    tokio::time::sleep(t - now).await;
-                }
+                wait_until(t).await;
                 t
             }
             None => Instant::now(),

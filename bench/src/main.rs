@@ -158,11 +158,12 @@ fn load_command(args: LoadArgs) -> Result<(), String> {
         out.by_status[5]
     );
     println!(
-        "latency p50 {}µs  p90 {}µs  p99 {}µs  p99.9 {}µs  max {}µs",
+        "latency p50 {}µs  p75 {}µs  p95 {}µs  p99 {}µs  p99.99 {}µs  max {}µs",
         out.percentile_us(0.5),
-        out.percentile_us(0.9),
+        out.percentile_us(0.75),
+        out.percentile_us(0.95),
         out.percentile_us(0.99),
-        out.percentile_us(0.999),
+        out.percentile_us(0.9999),
         out.latency.max()
     );
     Ok(())
@@ -220,9 +221,12 @@ fn measure(rt: &tokio::runtime::Runtime, nginx: &Nginx, spec: &load::Spec) -> Re
         seconds: out.elapsed.as_secs_f64(),
         cpu_ns: cpu1.saturating_sub(cpu0),
         p50_us: out.percentile_us(0.5),
+        p75_us: out.percentile_us(0.75),
         p90_us: out.percentile_us(0.9),
+        p95_us: out.percentile_us(0.95),
         p99_us: out.percentile_us(0.99),
         p999_us: out.percentile_us(0.999),
+        p9999_us: out.percentile_us(0.9999),
     })
 }
 
@@ -433,6 +437,7 @@ fn run_command(args: RunArgs) -> Result<(), String> {
 
     println!();
     print!("{}", report.table());
+    print!("{}", report.latency_table());
     if let Some(path) = &args.compare {
         let old: Report = std::fs::read(path)
             .map_err(|e| e.to_string())

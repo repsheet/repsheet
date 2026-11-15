@@ -44,6 +44,7 @@ sanitize:
 #   make bench                           full suite, results in bench/results/
 #   make bench BENCH_ARGS="-s store-1m"  one scenario (see: repsheet-bench list)
 #   make bench BENCH_ARGS="--compare bench/results/<earlier>.json"
+#   make bench BENCH_ARGS="--rate 50000"  latency percentiles below saturation
 # --------------------------------------------------------------------------
 
 BENCH_ARGS ?=
