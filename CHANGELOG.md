@@ -37,8 +37,8 @@ repository. History from both is preserved.
   directives, `$repsheet_bot_verifier_*` variables and metrics.
 - Store housekeeping runs in slices: a background sweep frees expired
   decisions and, after a snapshot, the ones it no longer contains, holding
-  the write lock for at most one slice (~70 µs at 1M decisions) and
-  refreshing the prefix filters as it goes. At 1M decisions the p99.99
+  the write lock for at most one slice (~10,000 entries at 1M decisions)
+  and refreshing the prefix filters as it goes. At 1M decisions the p99.99
   latency fell from 7.3 ms to the noise floor (~2 ms).
 - Network lookups check a 16,384-bit filter per prefix length before the
   store, so lengths with no matching network cost ~15 ns instead of ~85 ns.

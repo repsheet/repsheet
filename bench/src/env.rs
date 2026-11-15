@@ -33,6 +33,12 @@ impl Paths {
             valkey: dir.join(".deps/prefix/bin/valkey-server"),
             module: dir.join("redis/repsheet.so"),
         };
+        if fs::read_to_string(dir.join("redis/.flavor")).is_ok_and(|f| f.trim() == "sanitize") {
+            return Err(
+                "redis/repsheet.so is the sanitizer build (from make sanitize); run make module"
+                    .into(),
+            );
+        }
         for (what, path, fix) in [
             ("benchmark nginx", &p.nginx, "script/bootstrap bench"),
             ("valkey-server", &p.valkey, "script/bootstrap deps"),
@@ -89,14 +95,30 @@ impl Valkey {
             ])
             .arg("--dir")
             .arg(dir)
+            .arg("--logfile")
+            .arg(dir.join("valkey.log"))
             .arg("--loadmodule")
             .arg(&paths.module)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(fs::File::create(dir.join("valkey.err")).map_err(|e| e.to_string())?)
             .spawn()
             .map_err(|e| format!("starting valkey: {e}"))?;
-        let v = Valkey { port, child };
-        wait_for("valkey", Duration::from_secs(10), || v.connection().is_ok())?;
+        let mut v = Valkey { port, child };
+        let mut exited = false;
+        let _ = wait_for("valkey", Duration::from_secs(10), || {
+            exited = matches!(v.child.try_wait(), Ok(Some(_)));
+            exited || v.connection().is_ok()
+        });
+        if exited || v.connection().is_err() {
+            // Say why, e.g. a module built with SANITIZE=1, which a plain Valkey cannot load.
+            let log = fs::read_to_string(dir.join("valkey.log")).unwrap_or_default()
+                + &fs::read_to_string(dir.join("valkey.err")).unwrap_or_default();
+            let tail: Vec<&str> = log.lines().rev().take(2).collect();
+            return Err(format!(
+                "valkey did not start: {}",
+                tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
+            ));
+        }
         Ok(v)
     }
 

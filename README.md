@@ -421,47 +421,76 @@ CPUs. Requests are 64 keep-alive connections fetching a 6-byte file, which
 makes Repsheet's share as large as it can be; real requests cost more, so the
 same microseconds are a smaller fraction.
 
-Results on a 16-CPU Linux machine (nginx 1.30.6, Valkey 9.1.3):
+Results below are from one full run of each mode on a 16-CPU Linux laptop
+(nginx 1.30.6, Valkey 9.1.3), November 2026. Expect different absolute
+numbers on other hardware; the differences between the columns are what
+matter.
 
-| Scenario | nginx alone | with Repsheet | added per request |
-|----------|------------:|--------------:|------------------:|
-| empty store | 3.50 µs | 3.54 µs | +0.04 µs (noise) |
-| 10k decisions | 3.57 µs | 3.71 µs | +0.14 µs |
-| 100k decisions | 3.50 µs | 3.93 µs | +0.43 µs |
-| 1M decisions | 3.52 µs | 4.03 µs | +0.51 µs |
-| 100k decisions + 1,000 changes/s syncing | 3.52 µs | 3.93 µs | +0.40 µs |
-| cookie and header actors, 100k decisions | 3.58 µs | 4.35 µs | +0.78 µs |
-| decisions at every IPv4 and IPv6 prefix length | 3.69 µs | 4.85 µs | +1.16 µs |
-| bot verifier, browser traffic | 3.56 µs | 3.92 µs | +0.37 µs |
-| bot verifier, Googlebot from its ranges | 3.57 µs | 3.84 µs | +0.27 µs |
+### CPU per request (as fast as possible)
 
-Client latency at a fixed 50,000 requests/s (`--rate 50000`), median of three
-runs: p50, p75 and p95 are the same with and without Repsheet (18, 22 and 30
-µs) in every scenario, and p99 is within a few microseconds (43-69 µs). The
-p99.99 (1-3 ms on both sides) is scheduling noise on the test machine.
-Housekeeping (freeing expired decisions, removing what a new snapshot no
-longer contains, refreshing the prefix filters) runs in slices of at most
-~70 µs; when it walked the whole store at once, 1M decisions pushed
-Repsheet's p99.99 to 7.3 ms.
+`make bench`. Median of three 10-second runs per side; noise floor ±2.3%.
 
-What this means:
+| Scenario | nginx alone | with Repsheet | added | throughput alone → with |
+|----------|------------:|--------------:|------:|------------------------:|
+| empty store | 3.50 µs | 3.59 µs | +0.09 µs (noise) | 231k → 226k req/s |
+| 10k decisions | 3.51 µs | 3.73 µs | +0.22 µs | 229k → 220k |
+| 100k decisions | 3.51 µs | 3.92 µs | +0.41 µs | 231k → 211k |
+| 1M decisions | 3.54 µs | 4.03 µs | +0.49 µs | 228k → 204k |
+| 100k decisions, 1,000 changes/s syncing | 3.49 µs | 3.95 µs | +0.46 µs | 232k → 209k |
+| cookie and header actors, 100k decisions | 3.58 µs | 4.36 µs | +0.78 µs | 226k → 189k |
+| decisions at every IPv4 and IPv6 prefix length | 3.64 µs | 4.76 µs | +1.12 µs | 223k → 175k |
+| bot verifier, browser traffic | 3.56 µs | 3.91 µs | +0.34 µs | 228k → 211k |
+| bot verifier, Googlebot from its ranges | 3.53 µs | 3.90 µs | +0.37 µs | 230k → 211k |
 
-* **Lookups are cheap and grow slowly**: about half a microsecond at a
-  million decisions, and sync churn adds nothing measurable.
-* **Network decisions cost a little per prefix length in use**, about 15 ns
-  for each length the client's family has decisions at: a per-length filter
-  answers most of them without touching the store. Most deployments use a
-  handful of lengths; the worst case above uses all 138. (Without the
-  filters each length cost about 85 ns, 11.7 µs in that worst case.)
-* **The bot verifier's User-Agent check runs on every request**, so all
-  providers' patterns are combined into one JIT-compiled match (about 130 ns
-  for a browser User-Agent), done once per request even across internal
-  redirects. It was 2.10 µs when each of the seven patterns was interpreted
-  separately, twice for requests redirected to an index file.
-* **Large stores sync in pages.** nginx loads 1M decisions in about 3
-  seconds, a thousand at a time; no page keeps Valkey busy for more than about
-  2 ms. (Before paging, one snapshot of 1M decisions held Valkey for over a
-  second and exceeded `repsheet_redis_timeout`, so it never finished.)
+### Latency (fixed load)
+
+`make bench BENCH_ARGS="--rate 50000"`: 50,000 requests/s, well below
+capacity, measured from when each request was due. Microseconds, nginx alone
+/ with Repsheet, median of three runs.
+
+| Scenario | p50 | p75 | p95 | p99 | p99.99 |
+|----------|----:|----:|----:|----:|-------:|
+| empty store | 18 / 18 | 22 / 22 | 29 / 29 | 40 / 39 | 1672 / 1016 |
+| 10k decisions | 18 / 18 | 22 / 22 | 29 / 29 | 39 / 40 | 859 / 1283 |
+| 100k decisions | 18 / 18 | 22 / 22 | 29 / 29 | 40 / 40 | 1160 / 967 |
+| 1M decisions | 18 / 18 | 22 / 22 | 29 / 29 | 58 / 43 | 1965 / 1966 |
+| 100k decisions, 1,000 changes/s syncing | 18 / 18 | 22 / 22 | 29 / 29 | 40 / 41 | 1787 / 966 |
+| cookie and header actors, 100k decisions | 18 / 18 | 22 / 22 | 29 / 29 | 40 / 41 | 2167 / 1290 |
+| decisions at every IPv4 and IPv6 prefix length | 18 / 19 | 22 / 23 | 29 / 30 | 41 / 41 | 1611 / 1133 |
+| bot verifier, browser traffic | 18 / 18 | 22 / 22 | 29 / 29 | 40 / 40 | 1518 / 1098 |
+| bot verifier, Googlebot from its ranges | 18 / 18 | 22 / 22 | 29 / 29 | 54 / 41 | 2025 / 1841 |
+
+The p99.99 column (about 1-2 ms on both sides, with single runs up to 10 ms
+either way) is scheduling noise on the test machine, not Repsheet: the A/A
+scenario, which compares nginx alone against itself, varies just as much.
+
+### What this means
+
+* **Repsheet adds well under a microsecond of CPU per request** in every
+  realistic case, and nothing measurable to latency from p50 to p99.
+* **Lookups grow slowly with the store**: about half a microsecond at a
+  million decisions. Sync churn adds nothing beyond that.
+* **Each prefix length in use costs about 15 ns**: a per-length filter
+  answers most lookups without touching the store. Most deployments use a
+  handful of lengths; the worst case above uses all 138.
+* **The bot verifier's User-Agent check** is one JIT-compiled match per
+  request (about 130 ns for a browser User-Agent).
+* **Large stores sync in pages**: nginx loads 1M decisions in about 2
+  seconds, a thousand at a time, and no page keeps Valkey busy for more than
+  about 2 ms.
+* **Housekeeping runs in slices** (freeing expired decisions, removing what a
+  new snapshot no longer contains, refreshing the prefix filters): about
+  10,000 entries every 100 ms at a million decisions, so the store's lock is
+  never held for long.
+
+### Found and fixed with this benchmark
+
+| Problem | Before | After |
+|---------|--------|-------|
+| Snapshot of 1M decisions in one reply | blocked Valkey 1 s; exceeded the timeout, so nginx never synced | paged: 2 ms per page, synced in ~2 s |
+| Bot verifier, browser traffic | +2.10 µs per request (7 interpreted patterns, twice after internal redirects) | +0.34 µs |
+| Decisions at every prefix length | +11.69 µs per request | +1.12 µs |
+| Expiry sweep at 1M decisions | p99.99 7.3 ms (whole store walked under the write lock) | at the noise floor |
 
 ## Building
 
