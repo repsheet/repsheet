@@ -32,10 +32,13 @@ typedef struct {
     ngx_uint_t                   count;
     uint32_t                     v4_prefixes[33];
     uint32_t                     v6_prefixes[129];
-    /* Per prefix length, a bitmap of hashed networks with decisions; see store.c. */
+    /* Per prefix length, a bitmap of hashed networks with decisions; see store.c.
+     * filters_next is refilled by each sweep pass and replaces filters at its end. */
     u_char                      *filters;
-    ngx_uint_t                   ip_entries;
-    ngx_uint_t                   filter_stale;  /* IP entries removed since the last rebuild */
+    u_char                      *filters_next;
+    /* The background sweep: where it is, and the snapshot generation to keep. */
+    ngx_queue_t                 *cursor;
+    uint64_t                     sweep_generation;
     uint64_t                     generation;
 
     /* Sync state, owned by one worker at a time. */
@@ -94,7 +97,8 @@ ngx_int_t ngx_http_repsheet_store_set(ngx_http_repsheet_store_t *store, ngx_str_
 void ngx_http_repsheet_store_delete(ngx_http_repsheet_store_t *store, ngx_str_t *actor);
 uint64_t ngx_http_repsheet_store_begin_snapshot(ngx_http_repsheet_store_t *store);
 void ngx_http_repsheet_store_end_snapshot(ngx_http_repsheet_store_t *store, uint64_t generation);
-void ngx_http_repsheet_store_expire(ngx_http_repsheet_store_t *store);
+ngx_int_t ngx_http_repsheet_store_sweep_step(ngx_http_repsheet_store_t *store, ngx_uint_t budget);
+ngx_flag_t ngx_http_repsheet_store_sweep_pending(ngx_http_repsheet_store_t *store);
 
 /* redis.c: record an active detector's decision (local store + Valkey) */
 ngx_int_t ngx_http_repsheet_record(ngx_str_t *actor, rs_status_t status, ngx_str_t *reason, time_t ttl,

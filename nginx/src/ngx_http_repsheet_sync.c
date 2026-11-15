@@ -24,7 +24,9 @@
 
 #define CHANGES_PAGE 1000
 #define SNAPSHOT_PAGE 1000
-#define EXPIRE_EVERY 10000      /* ms between sweeps of expired entries */
+#define SWEEP_EVERY 100         /* ms between slices of the background sweep */
+#define SWEEP_PASS 10000        /* ms for a full pass over the store */
+#define SWEEP_MIN_SLICE 1000    /* entries per slice, at least */
 #define MAX_BACKOFF 30000
 
 typedef struct {
@@ -41,7 +43,7 @@ typedef struct {
     ngx_flag_t                      have_state;
     ngx_flag_t                      more;
     ngx_msec_t                      backoff;
-    ngx_msec_t                      last_expire;
+    ngx_event_t                     sweeper;
 
     /* A paged snapshot in progress. */
     ngx_flag_t                      paging;
@@ -538,11 +540,6 @@ tick(ngx_event_t *ev)
         return;
     }
 
-    if (ngx_current_msec - sync_state.last_expire >= EXPIRE_EVERY) {
-        ngx_http_repsheet_store_expire(sync_state.store);
-        sync_state.last_expire = ngx_current_msec;
-    }
-
     if (sync_state.cmd == NULL || sync_state.sub == NULL) {
         if (sync_state.cmd || sync_state.sub) {
             /* Half connected: start over with both. */
@@ -582,6 +579,30 @@ tick(ngx_event_t *ev)
 }
 
 
+/*
+ * Housekeeping in slices: a pass over the whole store about every
+ * SWEEP_PASS ms, never holding the store's write lock for more than one
+ * slice (~70 us at a million decisions). After a snapshot, slices run back
+ * to back, leaving the event loop a turn in between.
+ */
+static void
+sweep_tick(ngx_event_t *ev)
+{
+    ngx_http_repsheet_store_t  *store = sync_state.store;
+    ngx_uint_t                  slice;
+
+    if (!is_owner()) {
+        return;
+    }
+
+    slice = ngx_max(SWEEP_MIN_SLICE, store->sh->count / (SWEEP_PASS / SWEEP_EVERY) + 1);
+    (void) ngx_http_repsheet_store_sweep_step(store, slice);
+
+    ngx_add_timer(&sync_state.sweeper,
+                  ngx_http_repsheet_store_sweep_pending(store) ? 1 : SWEEP_EVERY);
+}
+
+
 ngx_int_t
 ngx_http_repsheet_sync_init_process(ngx_cycle_t *cycle)
 {
@@ -605,7 +626,10 @@ ngx_http_repsheet_sync_init_process(ngx_cycle_t *cycle)
     sync_state.conf = conf;
     sync_state.store = conf->zone->data;
     sync_state.log = cycle->log;
-    sync_state.last_expire = ngx_current_msec;
+    sync_state.sweeper.handler = sweep_tick;
+    sync_state.sweeper.log = cycle->log;
+    sync_state.sweeper.data = &sync_state;
+    sync_state.sweeper.cancelable = 1;
 
     /* Take over from a worker of a previous configuration generation. After a
      * reload the store and its sync position survive, so continue from there. */
@@ -619,6 +643,7 @@ ngx_http_repsheet_sync_init_process(ngx_cycle_t *cycle)
     sync_state.timer.cancelable = 1;
 
     ngx_add_timer(&sync_state.timer, 0);
+    ngx_add_timer(&sync_state.sweeper, SWEEP_EVERY);
     return NGX_OK;
 }
 
@@ -632,6 +657,9 @@ ngx_http_repsheet_sync_exit_process(ngx_cycle_t *cycle)
 
     if (sync_state.timer.timer_set) {
         ngx_del_timer(&sync_state.timer);
+    }
+    if (sync_state.sweeper.timer_set) {
+        ngx_del_timer(&sync_state.sweeper);
     }
 
     free_connections();

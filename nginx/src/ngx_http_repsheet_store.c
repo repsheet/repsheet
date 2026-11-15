@@ -14,16 +14,20 @@
  * reads, so each prefix length also has a 16,384-bit filter: a decision sets
  * the bit for a hash of its network, and a lookup only probes the tree when
  * the bit for the client's masked address is set. A set bit can be stale or
- * shared (the tree has the final say); a clear bit is always right. Removed
- * decisions leave their bits until the filters are rebuilt, after every
- * snapshot and in the expiry sweep once enough have gone.
+ * shared (the tree has the final say); a clear bit is always right.
+ *
+ * Housekeeping never holds the write lock for long: a background sweep walks
+ * the entries a slice at a time (ngx_http_repsheet_store_sweep_step), freeing
+ * expired decisions (reads already ignore them) and, after a snapshot,
+ * decisions the snapshot did not contain. Each pass also refills a second set
+ * of filters from the entries it keeps and swaps it in at the end, which
+ * clears the bits of removed decisions.
  */
 #include "ngx_http_repsheet_module.h"
 
 #define FILTER_BITS_LOG 14
 #define FILTER_BYTES (1 << (FILTER_BITS_LOG - 3))
 #define FILTER_SLOTS (33 + 129)     /* IPv4 /0-/32, IPv6 /0-/128 */
-#define FILTER_REBUILD_MIN 1024
 
 typedef struct {
     ngx_str_node_t   sn;
@@ -72,8 +76,13 @@ ngx_http_repsheet_store_init_zone(ngx_shm_zone_t *zone, void *data)
     ngx_rbtree_init(&sh->rbtree, &sh->sentinel, ngx_str_rbtree_insert_value);
     ngx_queue_init(&sh->entries);
 
-    /* ~324 KB. Without it (a very small zone) lookups just probe the tree. */
+    /* 2 x ~324 KB. Without them (a very small zone) lookups just probe the tree. */
     sh->filters = ngx_slab_calloc(shpool, FILTER_SLOTS * FILTER_BYTES);
+    sh->filters_next = sh->filters ? ngx_slab_calloc(shpool, FILTER_SLOTS * FILTER_BYTES) : NULL;
+    if (sh->filters_next == NULL && sh->filters) {
+        ngx_slab_free(shpool, sh->filters);
+        sh->filters = NULL;
+    }
 
     shpool->data = sh;
     shpool->log_nomem = 0;
@@ -99,7 +108,7 @@ prefix_counter(ngx_http_repsheet_shctx_t *sh, ngx_http_repsheet_entry_t *e)
 
 /* The filter bit of a masked network: Fibonacci hashing of its address. */
 static ngx_inline u_char *
-filter_byte(ngx_http_repsheet_shctx_t *sh, const rs_ip_t *net, u_char *mask)
+filter_byte(u_char *filters, const rs_ip_t *net, u_char *mask)
 {
     const uint8_t  *a = net->addr;
     uint64_t        h, hi, lo;
@@ -121,17 +130,20 @@ filter_byte(ngx_http_repsheet_shctx_t *sh, const rs_ip_t *net, u_char *mask)
 
     bit = (ngx_uint_t) (h >> (64 - FILTER_BITS_LOG));
     *mask = (u_char) (1 << (bit & 7));
-    return sh->filters + slot * FILTER_BYTES + (bit >> 3);
+    return filters + slot * FILTER_BYTES + (bit >> 3);
 }
 
 
+/* Into the live filters and the ones the current sweep pass is building. */
 static void
 filter_add(ngx_http_repsheet_shctx_t *sh, const rs_ip_t *net)
 {
     u_char  mask, *b;
 
     if (sh->filters) {
-        b = filter_byte(sh, net, &mask);
+        b = filter_byte(sh->filters, net, &mask);
+        *b |= mask;
+        b = filter_byte(sh->filters_next, net, &mask);
         *b |= mask;
     }
 }
@@ -148,29 +160,6 @@ entry_network(ngx_http_repsheet_entry_t *e, rs_ip_t *net)
 }
 
 
-/* Called with the write lock held. */
-static void
-filter_rebuild(ngx_http_repsheet_shctx_t *sh)
-{
-    ngx_queue_t                *q;
-    ngx_http_repsheet_entry_t  *e;
-    rs_ip_t                     net;
-
-    if (sh->filters == NULL) {
-        return;
-    }
-    ngx_memzero(sh->filters, FILTER_SLOTS * FILTER_BYTES);
-    for (q = ngx_queue_head(&sh->entries); q != ngx_queue_sentinel(&sh->entries); q = ngx_queue_next(q)) {
-        e = ngx_queue_data(q, ngx_http_repsheet_entry_t, queue);
-        if (e->family) {
-            entry_network(e, &net);
-            filter_add(sh, &net);
-        }
-    }
-    sh->filter_stale = 0;
-}
-
-
 static void
 remove_entry(ngx_http_repsheet_store_t *store, ngx_http_repsheet_entry_t *e)
 {
@@ -178,8 +167,11 @@ remove_entry(ngx_http_repsheet_store_t *store, ngx_http_repsheet_entry_t *e)
 
     if (counter) {
         (*counter)--;
-        store->sh->ip_entries--;
-        store->sh->filter_stale++;
+    }
+
+    /* Keep the sweep's cursor off freed memory. */
+    if (store->sh->cursor == &e->queue) {
+        store->sh->cursor = ngx_queue_next(&e->queue);
     }
 
     ngx_rbtree_delete(&store->sh->rbtree, &e->sn.node);
@@ -274,7 +266,7 @@ ngx_http_repsheet_store_lookup_ip(ngx_http_repsheet_store_t *store, const rs_ip_
         rs_ip_mask(&net, (uint8_t) prefix);
 
         if (sh->filters) {
-            b = filter_byte(sh, &net, &mask);
+            b = filter_byte(sh->filters, &net, &mask);
             if (!(*b & mask)) {
                 continue;   /* no decision for this network */
             }
@@ -375,7 +367,6 @@ ngx_http_repsheet_store_set(ngx_http_repsheet_store_t *store, ngx_str_t *actor,
     counter = prefix_counter(sh, e);
     if (counter) {
         (*counter)++;
-        sh->ip_entries++;
         filter_add(sh, &ip);
     }
 
@@ -419,54 +410,92 @@ ngx_http_repsheet_store_begin_snapshot(ngx_http_repsheet_store_t *store)
 
     ngx_rwlock_wlock(&store->sh->lock);
     generation = ++store->sh->generation;
+    /* Entries are being reloaded: do not drop any for being "old" meanwhile. */
+    store->sh->sweep_generation = 0;
     ngx_rwlock_unlock(&store->sh->lock);
 
     return generation;
 }
 
 
-static void
-sweep(ngx_http_repsheet_store_t *store, uint64_t generation, int64_t now)
-{
-    ngx_queue_t                *q, *next;
-    ngx_http_repsheet_entry_t  *e;
-
-    ngx_rwlock_wlock(&store->sh->lock);
-
-    for (q = ngx_queue_head(&store->sh->entries);
-         q != ngx_queue_sentinel(&store->sh->entries);
-         q = next)
-    {
-        next = ngx_queue_next(q);
-        e = ngx_queue_data(q, ngx_http_repsheet_entry_t, queue);
-
-        if ((generation && e->generation != generation)
-            || (now && e->expires && e->expires <= now))
-        {
-            remove_entry(store, e);
-        }
-    }
-
-    /* Clear bits left by removed decisions: always after a snapshot, otherwise
-     * once a good share of the networks are gone. */
-    if (generation || store->sh->filter_stale > ngx_max(FILTER_REBUILD_MIN, store->sh->ip_entries / 2)) {
-        filter_rebuild(store->sh);
-    }
-
-    ngx_rwlock_unlock(&store->sh->lock);
-}
-
-
-/* Remove everything the snapshot did not mention. */
+/*
+ * The snapshot is complete: everything it did not mention (an older
+ * generation) goes. The sweep does it in slices, starting a fresh pass so it
+ * covers every entry; lookups keep working meanwhile.
+ */
 void
 ngx_http_repsheet_store_end_snapshot(ngx_http_repsheet_store_t *store, uint64_t generation)
 {
-    sweep(store, generation, 0);
+    ngx_http_repsheet_shctx_t *sh = store->sh;
+
+    ngx_rwlock_wlock(&sh->lock);
+    sh->sweep_generation = generation;
+    sh->cursor = NULL;
+    if (sh->filters_next) {
+        ngx_memzero(sh->filters_next, FILTER_SLOTS * FILTER_BYTES);
+    }
+    ngx_rwlock_unlock(&sh->lock);
 }
 
 
-void
-ngx_http_repsheet_store_expire(ngx_http_repsheet_store_t *store)
+ngx_flag_t
+ngx_http_repsheet_store_sweep_pending(ngx_http_repsheet_store_t *store)
 {
-    sweep(store, 0, ngx_http_repsheet_now_ms());
+    return store->sh->sweep_generation != 0;
+}
+
+
+/*
+ * One slice of the background sweep: visit up to `budget` entries from where
+ * the last slice stopped, freeing expired ones and, after a snapshot, ones of
+ * an older generation. Returns 1 when the pass reached the end (the rebuilt
+ * filters are then swapped in and the next pass starts from the beginning).
+ */
+ngx_int_t
+ngx_http_repsheet_store_sweep_step(ngx_http_repsheet_store_t *store, ngx_uint_t budget)
+{
+    ngx_http_repsheet_shctx_t  *sh = store->sh;
+    ngx_http_repsheet_entry_t  *e;
+    ngx_queue_t                *q, *next;
+    ngx_uint_t                  n;
+    int64_t                     now = ngx_http_repsheet_now_ms();
+    rs_ip_t                     net;
+    u_char                     *swap;
+    ngx_int_t                   done = 0;
+
+    ngx_rwlock_wlock(&sh->lock);
+
+    q = sh->cursor ? sh->cursor : ngx_queue_head(&sh->entries);
+    for (n = 0; n < budget && q != ngx_queue_sentinel(&sh->entries); n++, q = next) {
+        next = ngx_queue_next(q);
+        e = ngx_queue_data(q, ngx_http_repsheet_entry_t, queue);
+
+        if ((e->expires && e->expires <= now)
+            || (sh->sweep_generation && e->generation != sh->sweep_generation))
+        {
+            remove_entry(store, e);
+            continue;
+        }
+        if (e->family && sh->filters_next) {
+            entry_network(e, &net);
+            filter_add(sh, &net);   /* sets it in both; only the next set matters here */
+        }
+    }
+
+    if (q == ngx_queue_sentinel(&sh->entries)) {
+        if (sh->filters) {
+            swap = sh->filters;
+            sh->filters = sh->filters_next;
+            sh->filters_next = swap;
+            ngx_memzero(sh->filters_next, FILTER_SLOTS * FILTER_BYTES);
+        }
+        sh->cursor = NULL;
+        sh->sweep_generation = 0;
+        done = 1;
+    } else {
+        sh->cursor = q;
+    }
+
+    ngx_rwlock_unlock(&sh->lock);
+    return done;
 }

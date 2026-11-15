@@ -35,6 +35,11 @@ repository. History from both is preserved.
   using nginx's asynchronous resolver, and records a `block` (or `mark`)
   decision `BY bot_verifier` for those that fail. `repsheet_bot_verifier*`
   directives, `$repsheet_bot_verifier_*` variables and metrics.
+- Store housekeeping runs in slices: a background sweep frees expired
+  decisions and, after a snapshot, the ones it no longer contains, holding
+  the write lock for at most one slice (~70 µs at 1M decisions) and
+  refreshing the prefix filters as it goes. At 1M decisions the p99.99
+  latency fell from 7.3 ms to the noise floor (~2 ms).
 - Network lookups check a 16,384-bit filter per prefix length before the
   store, so lengths with no matching network cost ~15 ns instead of ~85 ns.
   Decisions at every IPv4 and IPv6 length: +11.69 -> +1.16 µs per request.

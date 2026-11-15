@@ -438,10 +438,11 @@ Results on a 16-CPU Linux machine (nginx 1.30.6, Valkey 9.1.3):
 Client latency at a fixed 50,000 requests/s (`--rate 50000`), median of three
 runs: p50, p75 and p95 are the same with and without Repsheet (18, 22 and 30
 µs) in every scenario, and p99 is within a few microseconds (43-69 µs). The
-p99.99 (1-5 ms on both sides) is mostly scheduling noise on the test
-machine, except with 1M decisions, where Repsheet's p99.99 is a consistent
-7.3 ms: the periodic expiry sweep walks every decision while holding the
-store's write lock.
+p99.99 (1-3 ms on both sides) is scheduling noise on the test machine.
+Housekeeping (freeing expired decisions, removing what a new snapshot no
+longer contains, refreshing the prefix filters) runs in slices of at most
+~70 µs; when it walked the whole store at once, 1M decisions pushed
+Repsheet's p99.99 to 7.3 ms.
 
 What this means:
 
