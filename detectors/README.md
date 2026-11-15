@@ -27,7 +27,7 @@ the spot.
 
 | Detector | Directive | What it decides |
 |----------|-----------|-----------------|
-| [bot verifier](../README.md#bot-verifier) | `repsheet_bot_verifier` | Clients claiming to be a search engine crawler that are not: block (or mark) the address. |
+| [bot verifier](../docs/configuration.md#bot-verifier) | `repsheet_bot_verifier` | Clients claiming to be a search engine crawler that are not: block (or mark) the address. |
 
 The code lives in `nginx/src/<detector>/` and is called from
 `ngx_http_repsheet_handler()`. Shared pieces: `ngx_http_repsheet_record()`
