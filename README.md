@@ -11,8 +11,11 @@ Decisions come from **detectors** and from people:
   [bot verifier](docs/configuration.md#bot-verifier), which catches clients
   pretending to be search engine crawlers.
 * **Passive detectors** run out of band, on logs or other signals, and write
-  decisions into Valkey. Anything that can send a Redis command can be one:
-  your SIEM, a WAF, a script, a log pipeline.
+  decisions into Valkey. The first is the
+  [status-codes detector](detectors/passive/README.md#status-codes), which
+  blocks addresses that get too many error responses, fed from nginx's access
+  log by `repsheet-collector`. Anything that can send a Redis command can be
+  one: your SIEM, a WAF, a script, a log pipeline.
 * **People**, through the [admin UI](docs/admin.md) or `valkey-cli`.
 
 ```mermaid
@@ -46,7 +49,9 @@ flowchart LR
     active -- "REPSHEET.BLOCK / MARK ... BY bot_verifier" --> valkey
     active -. "reverse and forward lookups" .-> dns[("DNS resolver")]
 
-    passive["Passive detectors<br/>logs, SIEM, WAF, scripts"] -- "REPSHEET.BLOCK / MARK ... BY name" --> valkey
+    nginx -- "JSON access log" --> collector["repsheet-collector"]
+    collector -- "events" --> passive["Passive detectors<br/>(status codes; SIEM, WAF, scripts)"]
+    passive -- "REPSHEET.BLOCK / MARK ... BY name" --> valkey
     people([Operators]) --> admin["repsheet-admin<br/>(web UI)"]
     admin -- "read and change decisions" --> valkey
 
@@ -67,7 +72,7 @@ flowchart LR
 | `redis/`  | A module for Valkey (≥ 7.2) and Redis (≥ 7.2). It is the source of truth: it validates and canonicalizes actors, stores decisions with optional TTLs, and keeps an ordered change log. |
 | `nginx/`  | An nginx module. It holds a full copy of the decisions in shared memory, evaluates every request against it, and runs the active detectors. |
 | `admin/`  | `repsheet-admin`, a web UI for viewing and managing decisions (Rust). |
-| `detectors/` | How detectors work; the passive detector contract. |
+| `detectors/` | How detectors work, the passive detector contract, and `detectors/passive/`: `repsheet-collector` and the status-codes detector (Rust). |
 | `bench/`  | `repsheet-bench`, which measures Repsheet's per-request overhead (Rust). |
 | `common/` | Actor parsing and canonicalization shared by the modules and the admin UI. |
 
@@ -91,11 +96,20 @@ curl -i localhost:8080/                         # 403
 curl -s localhost:8080/metrics
 ```
 
+The status-codes detector is running too: 50 error responses within a
+minute get an address blocked for 5 minutes.
+
+```sh
+docker compose -f examples/docker-compose.yml exec valkey valkey-cli REPSHEET.CLEAR 172.16.0.0/12
+for i in $(seq 50); do curl -s -o /dev/null localhost:8080/no-such-page; done
+curl -i localhost:8080/                         # 403, BY status-codes
+```
+
 The admin UI is on http://localhost:8090. Grafana on http://localhost:3000
 shows the Repsheet dashboard (decisions, requests by decision, sync health,
-zone usage, and the bot verifier's claims, answer sources and lookup
-latency), fed by Prometheus on http://localhost:9090 scraping `/metrics`
-every 5 seconds. `make docker-logs` follows the logs and `make docker-down`
+zone usage, the bot verifier's claims, answer sources and lookup latency, and
+the status-codes detector and collector), fed by Prometheus on
+http://localhost:9090 scraping every 5 seconds. `make docker-logs` follows the logs and `make docker-down`
 stops everything.
 
 The Prometheus scrape config and the dashboard are in `examples/monitoring/`
@@ -121,13 +135,14 @@ marked actors.
 ## Building
 
 Requirements: a C compiler, make, hiredis ≥ 1.0 (for nginx), and nginx
-sources. The admin UI needs a Rust toolchain (1.88 or later). The tests need
+sources. The admin UI and the passive detectors need a Rust toolchain (1.88
+or later). The tests need
 [uv](https://docs.astral.sh/uv/).
 
 ```sh
 make bootstrap   # fetch + build pinned hiredis, Valkey and nginx into .deps/
-make             # build redis/repsheet.so, nginx with the module, and repsheet-admin
-make test        # pytest suite against real Valkey, nginx and the admin UI
+make             # build redis/repsheet.so, nginx with the module, repsheet-admin and the passive detectors
+make test        # pytest suite against real Valkey, nginx, the admin UI and the passive detectors
 make sanitize    # the same suite with ASan/UBSan on the module, Valkey and nginx
 make bench       # performance benchmarks (see docs/performance.md)
 
@@ -147,13 +162,13 @@ instead of Valkey, set `REPSHEET_SERVER=/path/to/redis-server`.
 
 CI covers Valkey 9.1 and Redis 8.10, nginx 1.30 (stable) and 1.31
 (mainline), static and dynamic builds, a sanitizer run, and the admin UI
-(rustfmt, clippy, unit and integration tests).
+and passive detectors (rustfmt, clippy, unit and integration tests).
 
 ## Releasing
 
 ```sh
 make version                  # the current version
-make bump VERSION=6.1.0       # set it in the module and both crates
+make bump VERSION=6.1.0       # set it in the module and the Rust crates
 git commit -am "Version 6.1.0"
 git tag -a v6.1.0 -m "Repsheet 6.1.0"
 git push origin HEAD v6.1.0

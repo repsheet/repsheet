@@ -1,7 +1,7 @@
-.PHONY: all bootstrap module nginx admin bench bench-quick version bump test test-module test-nginx test-admin sanitize clean distclean format \
+.PHONY: all bootstrap module nginx admin passive test-passive bench bench-quick version bump test test-module test-nginx test-admin sanitize clean distclean format \
         run-valkey run-admin docker-build docker-up docker-down docker-logs
 
-all: module nginx admin
+all: module nginx admin passive
 
 # Fetch and build pinned hiredis, Valkey and nginx into .deps/
 bootstrap:
@@ -17,7 +17,11 @@ nginx: module
 admin:
 	cargo build --release --manifest-path admin/Cargo.toml
 
-test: module admin
+# Passive detectors: repsheet-collector and the analyzers (Rust).
+passive:
+	cargo build --release --manifest-path detectors/passive/Cargo.toml
+
+test: module admin passive
 	cd tests && uv run pytest
 
 test-module: module
@@ -29,6 +33,10 @@ test-nginx: module
 test-admin: module admin
 	cargo test --manifest-path admin/Cargo.toml
 	cd tests && uv run pytest test_admin.py
+
+test-passive: module passive
+	cargo test --manifest-path detectors/passive/Cargo.toml
+	cd tests && uv run pytest test_passive.py
 
 # Full suite with ASan/UBSan on the module, Valkey and nginx.
 sanitize:
@@ -125,11 +133,13 @@ bump:
 format:
 	clang-format -i common/*.c common/*.h redis/src/*.c
 	cargo fmt --manifest-path admin/Cargo.toml
+	cargo fmt --manifest-path detectors/passive/Cargo.toml
 
 clean:
 	$(MAKE) -C redis clean
 	cargo clean --manifest-path admin/Cargo.toml
 	cargo clean --manifest-path bench/Cargo.toml
+	cargo clean --manifest-path detectors/passive/Cargo.toml
 
 distclean: clean
 	script/bootstrap clean

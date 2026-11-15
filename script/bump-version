@@ -7,6 +7,7 @@
 #   redis/src/repsheet.c   REPSHEET_VERSION and REPSHEET_VERSION_NUM
 #   admin/Cargo.toml       (and admin/Cargo.lock)
 #   bench/Cargo.toml       (and bench/Cargo.lock)
+#   detectors/passive/Cargo.toml (and its Cargo.lock)
 #
 # Nothing is committed or tagged; the script prints the next steps.
 set -euo pipefail
@@ -34,7 +35,7 @@ sed -i.bak \
   redis/src/repsheet.c
 rm -f redis/src/repsheet.c.bak
 
-for crate in admin bench; do
+for crate in admin bench detectors/passive; do
   # Only the package's own version: the first `version =` line, in [package].
   awk -v v="$version" '!done && /^version = "/ { $0 = "version = \"" v "\""; done = 1 } { print }' \
     "$crate/Cargo.toml" > "$crate/Cargo.toml.tmp" && mv "$crate/Cargo.toml.tmp" "$crate/Cargo.toml"

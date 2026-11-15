@@ -3,6 +3,8 @@
 #   docker build --target valkey -t repsheet-valkey .
 #   docker build --target nginx  -t repsheet-nginx  .
 #   docker build --target admin  -t repsheet-admin  .
+#   docker build --target collector    -t repsheet-collector    .
+#   docker build --target status-codes -t repsheet-status-codes .
 #
 # or use examples/docker-compose.yml. Modules are built inside the official
 # images they run in, so they match that nginx and Valkey exactly.
@@ -69,3 +71,25 @@ EXPOSE 8090
 # loopback only (see examples/docker-compose.yml). There is no login.
 ENV REPSHEET_ADMIN_LISTEN=0.0.0.0:8090
 ENTRYPOINT ["repsheet-admin"]
+
+# --------------------------------------------------------------------------
+# Passive detectors (detectors/passive): the log collector and analyzers.
+FROM rust:1-slim-trixie AS passive-build
+WORKDIR /src
+COPY detectors/passive /src/passive
+RUN cd passive && cargo build --release --locked
+
+FROM debian:trixie-slim AS collector
+COPY --from=passive-build /src/passive/target/release/repsheet-collector /usr/local/bin/repsheet-collector
+# Reads nginx's access log; it needs read access to the file and nothing else.
+USER nobody
+ENV REPSHEET_COLLECTOR_METRICS=0.0.0.0:7402
+ENTRYPOINT ["repsheet-collector"]
+
+FROM debian:trixie-slim AS status-codes
+COPY --from=passive-build /src/passive/target/release/repsheet-status-codes /usr/local/bin/repsheet-status-codes
+USER nobody
+EXPOSE 7400
+ENV REPSHEET_STATUS_CODES_LISTEN=0.0.0.0:7400 \
+    REPSHEET_STATUS_CODES_METRICS=0.0.0.0:7401
+ENTRYPOINT ["repsheet-status-codes"]

@@ -1,4 +1,5 @@
-# Scrapes the nginx module's metrics (location = /metrics in examples/nginx.conf).
+# Scrapes the nginx module's metrics (location = /metrics in examples/nginx.conf)
+# and the passive detector (collector and status-codes analyzer).
 global:
   scrape_interval: 5s
   evaluation_interval: 5s
@@ -8,5 +9,17 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["nginx:80"]
+        labels:
+          instance: nginx
+
+  - job_name: status-codes
+    static_configs:
+      - targets: ["status-codes:7401"]
+        labels:
+          instance: status-codes
+
+  - job_name: collector
+    static_configs:
+      - targets: ["collector:7402"]
         labels:
           instance: nginx

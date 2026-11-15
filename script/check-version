@@ -6,7 +6,7 @@
 #
 # The tag must be v<version> (optionally with a suffix such as -rc.1), and
 # <version> must equal REPSHEET_VERSION in redis/src/repsheet.c and the
-# version in admin/Cargo.toml and bench/Cargo.toml.
+# version in admin/Cargo.toml, bench/Cargo.toml and detectors/passive/Cargo.toml.
 set -euo pipefail
 
 tag="${1:?usage: script/check-version <tag>}"
@@ -27,7 +27,7 @@ check() { # what found
 }
 check "REPSHEET_VERSION (redis/src/repsheet.c)" \
   "$(sed -n 's/^#define REPSHEET_VERSION "\(.*\)"$/\1/p' "$root/redis/src/repsheet.c")"
-for crate in admin bench; do
+for crate in admin bench detectors/passive; do
   check "$crate/Cargo.toml version" "$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/$crate/Cargo.toml" | head -1)"
 done
 

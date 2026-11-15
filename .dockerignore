@@ -4,3 +4,5 @@ tests/.venv
 **/*.o
 **/*.so
 admin/target
+bench/target
+detectors/passive/target

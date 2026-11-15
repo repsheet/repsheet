@@ -8,4 +8,5 @@ dump.rdb
 redis/.flavor
 admin/target/
 bench/target/
+detectors/passive/target/
 bench/results/

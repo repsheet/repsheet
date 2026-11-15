@@ -39,5 +39,13 @@ gives detectors a non-blocking Valkey connection.
 Passive detectors run out of band: they read access logs, application
 events, threat feeds or anything else, and write decisions into Valkey.
 nginx enforces them through the sync it already does; the request path never
-waits for them. See [passive/README.md](passive/README.md) for the contract.
-None are built yet.
+waits for them. See [passive/README.md](passive/README.md) for the contract
+and the included detectors.
+
+| Detector | Program | What it decides |
+|----------|---------|-----------------|
+| [status codes](passive/README.md#status-codes) | `repsheet-status-codes` | Addresses that get too many error responses (by default 50 responses with status 400-599 in a minute): block (or mark) the address. |
+
+The included detectors get traffic from nginx through
+[`repsheet-collector`](passive/README.md#the-log-collector), which follows
+an access log on each nginx host and forwards every request to them.

@@ -4,6 +4,9 @@
 # admin UI on http://localhost:8090 (no login; published on loopback only),
 # Grafana on http://localhost:3000 (Repsheet dashboard; admin/admin to edit),
 # Prometheus on http://localhost:9090.
+# A passive detector blocks addresses that get 50 error responses in a minute
+# (for 5 minutes): nginx logs every request to a shared volume, the collector
+# follows the log and forwards it to the status-codes analyzer.
 # Manage decisions with:
 #   docker compose -f examples/docker-compose.yml exec valkey valkey-cli REPSHEET.BLOCK 172.16.0.0/12 REASON demo
 name: repsheet
@@ -24,6 +27,7 @@ services:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       # http-level settings; the 00- prefix makes them load before default.conf
       - ./repsheet.conf:/etc/nginx/conf.d/00-repsheet.conf:ro
+      - events:/var/log/repsheet
     depends_on:
       - valkey
 
@@ -35,6 +39,33 @@ services:
       REPSHEET_REDIS: redis://valkey:6379
     ports:
       - "127.0.0.1:8090:8090"
+    depends_on:
+      - valkey
+
+  # Passive detector: nginx's event log -> collector -> status-codes -> Valkey.
+  collector:
+    build:
+      context: ..
+      target: collector
+    environment:
+      REPSHEET_COLLECTOR_FILE: /var/log/repsheet/events.log
+      REPSHEET_COLLECTOR_FORWARD: status-codes:7400
+    volumes:
+      - events:/var/log/repsheet:ro
+    depends_on:
+      - nginx
+      - status-codes
+
+  status-codes:
+    build:
+      context: ..
+      target: status-codes
+    environment:
+      REPSHEET_REDIS: redis://valkey:6379
+      REPSHEET_STATUS_CODES_THRESHOLD: "50"
+      REPSHEET_STATUS_CODES_WINDOW: 60s
+      REPSHEET_STATUS_CODES_STATUSES: 400-599
+      REPSHEET_STATUS_CODES_TTL: 5m
     depends_on:
       - valkey
 
@@ -71,5 +102,6 @@ services:
       - prometheus
 
 volumes:
+  events:
   prometheus:
   grafana:
