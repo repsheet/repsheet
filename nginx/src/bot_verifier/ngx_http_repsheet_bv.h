@@ -59,6 +59,8 @@ typedef struct {
     ngx_uint_t    index;
     ngx_regex_t  *user_agent;
     ngx_str_t     user_agent_src;
+    ngx_uint_t    user_agent_captures;  /* groups in its own pattern */
+    ngx_uint_t    group;                /* its group in the combined pattern */
     ngx_array_t  *domains;      /* ngx_str_t, lowercase, no leading dot */
     ngx_array_t  *range_files;  /* ngx_str_t */
     ngx_array_t  *ranges;       /* ngx_cidr_t, loaded from range_files */
@@ -97,6 +99,9 @@ typedef struct {
 
 typedef struct {
     ngx_array_t      providers;         /* bv_provider_t */
+    /* All providers' User-Agent patterns as one, JIT-compiled (PCRE2). */
+    void            *user_agents;       /* pcre2_code */
+    void            *match_data;        /* pcre2_match_data */
     ngx_shm_zone_t  *zone;
     size_t           zone_size;
     time_t           ttl[4];            /* by bv_result_e */
@@ -137,6 +142,7 @@ ngx_chain_t *ngx_http_repsheet_bot_verifier_metrics(ngx_http_request_t *r);
 char *bv_providers_add_builtin(ngx_conf_t *cf, bv_main_conf_t *mcf);
 char *bv_provider_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 char *bv_providers_load_ranges(ngx_conf_t *cf, bv_main_conf_t *mcf);
+char *bv_providers_compile(ngx_conf_t *cf, bv_main_conf_t *mcf);
 bv_provider_t *bv_provider_for_user_agent(bv_main_conf_t *mcf, ngx_str_t *ua);
 char *bv_ranges_directive(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 ngx_flag_t bv_domain_matches(bv_provider_t *p, ngx_str_t *host);

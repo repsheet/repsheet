@@ -431,8 +431,8 @@ Results on a 16-CPU Linux machine (nginx 1.30.6, Valkey 9.1.3):
 | 100k decisions + 1,000 changes/s syncing | 3.52 µs | 3.93 µs | +0.40 µs |
 | cookie and header actors, 100k decisions | 3.58 µs | 4.35 µs | +0.78 µs |
 | decisions at every IPv4 and IPv6 prefix length | 3.61 µs | 15.31 µs | +11.69 µs |
-| bot verifier, browser traffic | 3.59 µs | 5.70 µs | +2.10 µs |
-| bot verifier, Googlebot from its ranges | 3.43 µs | 4.05 µs | +0.61 µs |
+| bot verifier, browser traffic | 3.56 µs | 3.92 µs | +0.37 µs |
+| bot verifier, Googlebot from its ranges | 3.57 µs | 3.84 µs | +0.27 µs |
 
 What this means:
 
@@ -441,9 +441,11 @@ What this means:
 * **Network decisions cost per prefix length in use** (about 85 ns for each
   length the client's family has decisions at). Most deployments use a
   handful of lengths; the worst case above uses all 138.
-* **The bot verifier's User-Agent check runs on every request.** Enable
-  `pcre_jit on;` (main context): it cut this cost by about 0.65 µs per request
-  in our measurements.
+* **The bot verifier's User-Agent check runs on every request**, so all
+  providers' patterns are combined into one JIT-compiled match (about 130 ns
+  for a browser User-Agent), done once per request even across internal
+  redirects. It was 2.10 µs when each of the seven patterns was interpreted
+  separately, twice for requests redirected to an index file.
 * **Large stores sync in pages.** nginx loads 1M decisions in about 3
   seconds, a thousand at a time; no page keeps Valkey busy for more than about
   2 ms. (Before paging, one snapshot of 1M decisions held Valkey for over a

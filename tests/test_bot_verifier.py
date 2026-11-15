@@ -368,6 +368,27 @@ class TestCustomProviders:
         assert verdict(get(n, "192.0.2.30", "ExampleBot/1.0")) == (200, "verified", "examplebot")
         assert get(n, "192.0.2.31", "ExampleBot/2").status_code == 403
 
+    def test_patterns_with_groups_map_to_the_right_provider(self, dns, bv):
+        """The patterns are matched as one; groups inside them must not shift providers."""
+        dns.record("192.0.2.41", "x.alpha.example")
+        dns.record("192.0.2.42", "x.beta.example")
+        n = bv(http="""
+            repsheet_bot_verifier_provider alpha { user_agent "(al)(pha)?bot/(\\d+)"; domain alpha.example; }
+            repsheet_bot_verifier_provider beta  { user_agent "beta(bot|crawler)";       domain beta.example; }""")
+        assert verdict(get(n, "192.0.2.41", "AlphaBot/7")) == (200, "verified", "alpha")
+        assert verdict(get(n, "192.0.2.42", "BetaCrawler")) == (200, "verified", "beta")
+        assert verdict(get(n, "192.0.2.43", "betabot")) == (403, "failed", "beta")
+        assert verdict(get(n, "192.0.2.10", GOOGLEBOT))[2] == "google"
+
+    def test_patterns_that_cannot_be_combined_still_match(self, dns, bv):
+        dns.record("192.0.2.44", "x.beta.example")
+        n = bv(http="""
+            repsheet_bot_verifier_provider alpha { user_agent "(?<name>alphabot)"; domain alpha.example; }
+            repsheet_bot_verifier_provider beta  { user_agent "(?<name>betabot)";  domain beta.example; }""")
+        assert "matching User-Agent patterns one by one" in n.error_log()
+        assert verdict(get(n, "192.0.2.44", "betabot")) == (200, "verified", "beta")
+        assert verdict(get(n, "203.0.113.9", BROWSER)) == (200, "", "")
+
     def test_invalid(self, bv):
         with pytest.raises(RuntimeError, match="requires \"user_agent\""):
             bv(http="repsheet_bot_verifier_provider p { domain x.example; }")

@@ -35,6 +35,9 @@ repository. History from both is preserved.
   using nginx's asynchronous resolver, and records a `block` (or `mark`)
   decision `BY bot_verifier` for those that fail. `repsheet_bot_verifier*`
   directives, `$repsheet_bot_verifier_*` variables and metrics.
+- The bot verifier matches all providers' User-Agent patterns as one
+  JIT-compiled PCRE2 pattern, once per request: its cost for ordinary
+  traffic fell from 2.10 µs to 0.37 µs per request.
 - `REPSHEET.SNAPSHOT CURSOR <c> [COUNT n]` returns the store one page at a
   time. nginx and the admin UI load snapshots in pages and replay the change
   log from the first page, so a large store (1M decisions: ~1,000 pages,

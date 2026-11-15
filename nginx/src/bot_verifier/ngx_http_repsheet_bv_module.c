@@ -308,20 +308,16 @@ ngx_http_repsheet_bot_verifier_check(ngx_http_request_t *r, ngx_http_repsheet_ve
         if (ctx->waiting) {
             return NGX_AGAIN;   /* woken by an unrelated event; still waiting */
         }
+        if (ctx->verdict.result == BV_NONE) {
+            return NGX_DECLINED;   /* no claim; already known before an internal redirect */
+        }
         return bv_apply(r, ctx, lcf, v);
     }
 
-    if (r->headers_in.user_agent == NULL) {
-        return NGX_DECLINED;
-    }
-    provider = bv_provider_for_user_agent(bv_mcf, &r->headers_in.user_agent->value);
-    if (provider == NULL) {
-        return NGX_DECLINED;
-    }
-    if (!bv_client_addr(r->connection, &addr)) {
-        return NGX_DECLINED;
-    }
-
+    /*
+     * The context is created for every request, claim or not, so the
+     * User-Agent is matched once even if the request is internally redirected.
+     */
     cln = ngx_pool_cleanup_add(r->pool, sizeof(bv_ctx_t));
     if (cln == NULL) {
         return NGX_DECLINED;
@@ -330,6 +326,15 @@ ngx_http_repsheet_bot_verifier_check(ngx_http_request_t *r, ngx_http_repsheet_ve
     ngx_memzero(ctx, sizeof(bv_ctx_t));
     cln->handler = bv_ctx_cleanup;
     ngx_http_set_ctx(r, ctx, ngx_http_repsheet_bot_verifier_module);
+
+    provider = r->headers_in.user_agent
+               ? bv_provider_for_user_agent(bv_mcf, &r->headers_in.user_agent->value)
+               : NULL;
+    if (provider == NULL || !bv_client_addr(r->connection, &addr)) {
+        ctx->evaluated = 1;
+        ctx->counted = 1;
+        return NGX_DECLINED;
+    }
 
     rc = bv_verify(r, ctx, provider, &addr, r->connection->sockaddr, r->connection->socklen);
 
@@ -357,7 +362,7 @@ bv_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v, uintptr_t data)
     bv_provider_t   *p;
     const char      *s = "";
 
-    if (ctx && ctx->evaluated) {
+    if (ctx && ctx->evaluated && ctx->verdict.result != BV_NONE) {
         if (data == 0) {
             s = bv_result_name(ctx->verdict.result);
         } else if (data == 2) {
@@ -659,6 +664,9 @@ ngx_http_bot_verifier_init_main_conf(ngx_conf_t *cf, void *conf)
     ngx_conf_init_msec_value(mcf->cache_timeout, 100);
 
     if (bv_providers_load_ranges(cf, mcf) != NGX_CONF_OK) {
+        return NGX_CONF_ERROR;
+    }
+    if (bv_providers_compile(cf, mcf) != NGX_CONF_OK) {
         return NGX_CONF_ERROR;
     }
 

@@ -51,6 +51,7 @@ bv_compile_user_agent(ngx_conf_t *cf, bv_provider_t *p, ngx_str_t *pattern)
 
     p->user_agent = rc.regex;
     p->user_agent_src = *pattern;
+    p->user_agent_captures = rc.captures;
     return NGX_OK;
 }
 
@@ -451,11 +452,134 @@ bv_providers_load_ranges(ngx_conf_t *cf, bv_main_conf_t *mcf)
 /* matching                                                                  */
 /* ------------------------------------------------------------------------ */
 
+/*
+ * Combine every provider's User-Agent pattern into one, "(p1)|(p2)|...", and
+ * JIT-compile it, so a request costs one fast match instead of one
+ * interpreted match per provider (browsers match none, so they paid for all
+ * of them). Each provider's group number accounts for the groups in the
+ * patterns before it.
+ *
+ * This uses PCRE2 directly: nginx's allocator only works inside its own regex
+ * calls, so JIT compilation of an ngx_regex_t fails unless "pcre_jit" is on.
+ * The pattern is freed with the configuration. Without PCRE2, or if the
+ * patterns cannot be combined, providers are matched one by one.
+ */
+#if (NGX_PCRE2)
+
+static void
+bv_user_agents_cleanup(void *data)
+{
+    bv_main_conf_t *mcf = data;
+
+    if (mcf->match_data) {
+        pcre2_match_data_free(mcf->match_data);
+    }
+    if (mcf->user_agents) {
+        pcre2_code_free(mcf->user_agents);
+    }
+}
+
+#endif
+
+
+char *
+bv_providers_compile(ngx_conf_t *cf, bv_main_conf_t *mcf)
+{
+#if (NGX_PCRE2)
+    bv_provider_t       *p = mcf->providers.elts;
+    pcre2_code          *code;
+    ngx_pool_cleanup_t  *cln;
+    PCRE2_SIZE           erroff;
+    u_char              *pattern, *d, errstr[128];
+    size_t               len = 0;
+    ngx_uint_t           i, group = 1;
+    int                  err;
+
+    for (i = 0; i < mcf->providers.nelts; i++) {
+        if (p[i].user_agent) {
+            len += p[i].user_agent_src.len + 3;
+        }
+    }
+    if (len == 0) {
+        return NGX_CONF_OK;
+    }
+
+    pattern = ngx_pnalloc(cf->temp_pool, len);
+    if (pattern == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    d = pattern;
+    for (i = 0; i < mcf->providers.nelts; i++) {
+        if (p[i].user_agent == NULL) {
+            continue;
+        }
+        if (d != pattern) {
+            *d++ = '|';
+        }
+        *d++ = '(';
+        d = ngx_cpymem(d, p[i].user_agent_src.data, p[i].user_agent_src.len);
+        *d++ = ')';
+        p[i].group = group;
+        group += 1 + p[i].user_agent_captures;
+    }
+
+    code = pcre2_compile(pattern, d - pattern, PCRE2_CASELESS, &err, &erroff, NULL);
+    if (code == NULL) {
+        /* E.g. two custom patterns with the same named group. */
+        pcre2_get_error_message(err, errstr, sizeof(errstr));
+        ngx_conf_log_error(NGX_LOG_NOTICE, cf, 0,
+                           "repsheet_bot_verifier: matching User-Agent patterns one by one (%s)", errstr);
+        return NGX_CONF_OK;
+    }
+
+    cln = ngx_pool_cleanup_add(cf->pool, 0);
+    if (cln == NULL) {
+        pcre2_code_free(code);
+        return NGX_CONF_ERROR;
+    }
+    cln->handler = bv_user_agents_cleanup;
+    cln->data = mcf;
+
+    mcf->user_agents = code;
+    if (pcre2_jit_compile(code, PCRE2_JIT_COMPLETE) != 0) {
+        ngx_conf_log_error(NGX_LOG_NOTICE, cf, 0,
+                           "repsheet_bot_verifier: PCRE2 JIT unavailable, User-Agent matching is slower");
+    }
+    mcf->match_data = pcre2_match_data_create_from_pattern(code, NULL);
+    if (mcf->match_data == NULL) {
+        return NGX_CONF_ERROR;
+    }
+#endif
+    return NGX_CONF_OK;
+}
+
+
 bv_provider_t *
 bv_provider_for_user_agent(bv_main_conf_t *mcf, ngx_str_t *ua)
 {
     bv_provider_t  *p = mcf->providers.elts;
     ngx_uint_t      i;
+
+#if (NGX_PCRE2)
+    if (mcf->user_agents) {
+        PCRE2_SIZE  *ov;
+        int          n;
+
+        /* Workers are single-threaded, so one match data serves every request. */
+        n = pcre2_match(mcf->user_agents, ua->data, ua->len, 0, 0, mcf->match_data, NULL);
+        if (n <= 0) {
+            return NULL;
+        }
+        ov = pcre2_get_ovector_pointer(mcf->match_data);
+        for (i = 0; i < mcf->providers.nelts; i++) {
+            if (p[i].user_agent && p[i].group < (ngx_uint_t) n && ov[2 * p[i].group] != PCRE2_UNSET) {
+                return &p[i];
+            }
+        }
+        return NULL;
+    }
+#endif
 
     for (i = 0; i < mcf->providers.nelts; i++) {
         if (p[i].user_agent && ngx_regex_exec(p[i].user_agent, ua, NULL, 0) >= 0) {
