@@ -582,7 +582,7 @@ tick(ngx_event_t *ev)
 /*
  * Housekeeping in slices: a pass over the whole store about every
  * SWEEP_PASS ms, never holding the store's write lock for more than one
- * slice (~70 us at a million decisions). After a snapshot, slices run back
+ * slice (~10,000 entries at a million decisions). After a snapshot, slices run back
  * to back, leaving the event loop a turn in between.
  */
 static void
