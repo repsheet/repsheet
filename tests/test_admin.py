@@ -3,7 +3,7 @@
 import html
 import re
 
-from conftest import wait_for
+from conftest import ROOT, wait_for
 
 
 def decision(r, actor):
@@ -30,7 +30,9 @@ class TestPages:
         assert "1 marked" in t and "1 allowed" in t
         assert "session" in t and "ip" in t
         assert "Valkey" in t or "Redis" in t
-        assert "6.0.0" in t
+        version = re.search(r'#define REPSHEET_VERSION "([^"]+)"',
+                            (ROOT / "redis" / "src" / "repsheet.c").read_text()).group(1)
+        assert version in t
 
     def test_decisions_filters(self, r, admin):
         r.execute_command("REPSHEET.BLOCK", "1.1.1.1", "REASON", "credential stuffing")

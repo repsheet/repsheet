@@ -151,13 +151,12 @@ CI covers Valkey 9.1 and Redis 8.10, nginx 1.30 (stable) and 1.31
 
 ## Releasing
 
-Set the new version in `redis/src/repsheet.c` (`REPSHEET_VERSION`),
-`admin/Cargo.toml` and `bench/Cargo.toml` (then `cargo update -w` in each),
-commit, and push a tag:
-
 ```sh
+make version                  # the current version
+make bump VERSION=6.1.0       # set it in the module and both crates
+git commit -am "Version 6.1.0"
 git tag -a v6.1.0 -m "Repsheet 6.1.0"
-git push origin v6.1.0
+git push origin HEAD v6.1.0
 ```
 
 The release workflow checks that the tag matches the code

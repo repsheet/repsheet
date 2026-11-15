@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+#
+# Set the version everywhere it lives:
+#
+#   script/bump-version 6.1.0
+#
+#   redis/src/repsheet.c   REPSHEET_VERSION and REPSHEET_VERSION_NUM
+#   admin/Cargo.toml       (and admin/Cargo.lock)
+#   bench/Cargo.toml       (and bench/Cargo.lock)
+#
+# Nothing is committed or tagged; the script prints the next steps.
+set -euo pipefail
+
+version="${1:-}"
+if [[ ! "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+  echo "usage: script/bump-version <major>.<minor>.<patch>   (e.g. 6.1.0)" >&2
+  exit 1
+fi
+major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}" patch="${BASH_REMATCH[3]}"
+if (( minor > 99 || patch > 99 )); then
+  echo "minor and patch must be below 100 (REPSHEET_VERSION_NUM is MMmmpp)" >&2
+  exit 1
+fi
+num=$(( major * 10000 + minor * 100 + patch ))
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+
+current="$(sed -n 's/^#define REPSHEET_VERSION "\(.*\)"$/\1/p' redis/src/repsheet.c)"
+
+sed -i.bak \
+  -e "s/^#define REPSHEET_VERSION \".*\"$/#define REPSHEET_VERSION \"$version\"/" \
+  -e "s/^#define REPSHEET_VERSION_NUM [0-9]*$/#define REPSHEET_VERSION_NUM $num/" \
+  redis/src/repsheet.c
+rm -f redis/src/repsheet.c.bak
+
+for crate in admin bench; do
+  # Only the package's own version: the first `version =` line, in [package].
+  awk -v v="$version" '!done && /^version = "/ { $0 = "version = \"" v "\""; done = 1 } { print }' \
+    "$crate/Cargo.toml" > "$crate/Cargo.toml.tmp" && mv "$crate/Cargo.toml.tmp" "$crate/Cargo.toml"
+  if command -v cargo >/dev/null; then
+    (cd "$crate" && { cargo update --workspace --offline -q 2>/dev/null || cargo update --workspace -q; })
+  else
+    echo "warning: cargo not found; run 'cargo update --workspace' in $crate/" >&2
+  fi
+done
+
+script/check-version "v$version"
+cat <<EOF2
+
+Version $current -> $version. Next:
+  git commit -am "Version $version"
+  git tag -a v$version -m "Repsheet $version"
+  git push origin HEAD v$version     # the release workflow publishes it
+EOF2

@@ -1,4 +1,4 @@
-.PHONY: all bootstrap module nginx admin bench bench-quick test test-module test-nginx test-admin sanitize clean distclean format \
+.PHONY: all bootstrap module nginx admin bench bench-quick version bump test test-module test-nginx test-admin sanitize clean distclean format \
         run-valkey run-admin docker-build docker-up docker-down docker-logs
 
 all: module nginx admin
@@ -108,6 +108,19 @@ docker-down:
 
 docker-logs:
 	$(COMPOSE) logs -f
+
+# --------------------------------------------------------------------------
+# Versions and releases (see README "Releasing").
+#   make version                 print the current version
+#   make bump VERSION=6.1.0      set it everywhere; then commit and tag
+# --------------------------------------------------------------------------
+
+version:
+	@sed -n 's/^#define REPSHEET_VERSION "\(.*\)"$$/\1/p' redis/src/repsheet.c
+
+bump:
+	@test -n "$(VERSION)" || { echo "usage: make bump VERSION=<major>.<minor>.<patch>"; exit 1; }
+	script/bump-version $(VERSION)
 
 format:
 	clang-format -i common/*.c common/*.h redis/src/*.c

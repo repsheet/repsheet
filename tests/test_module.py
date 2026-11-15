@@ -14,7 +14,11 @@ def get(r, actor):
 
 
 def test_version(r):
-    assert r.execute_command("REPSHEET.VERSION") == "6.0.0"
+    import re
+    from conftest import ROOT
+    source = (ROOT / "redis" / "src" / "repsheet.c").read_text()
+    expected = re.search(r'#define REPSHEET_VERSION "([^"]+)"', source).group(1)
+    assert r.execute_command("REPSHEET.VERSION") == expected
 
 
 @pytest.mark.parametrize("command,status", [
